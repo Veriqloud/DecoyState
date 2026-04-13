@@ -41,3 +41,16 @@ and `odr_losses = 0.0 dB` for the Rusca SNSPD reference.
 At 25 km for AUREA: 5 dB (fibre) + 11.4 dB (odr) = **16.4 dB total** → η_sys ≈ 0.46%
 
 ---
+
+## Papers
+
+| References | |
+|---|---|
+| Rusca et al. (2018) *Appl. Phys. Lett.* **112**, 171104 | Main security proof — Appendix A (bounds) + B (SKR). Eqs. A16–A25, B8 |
+| Lim, Curty, Walenta, Xu, Zbinden (2014) *Phys. Rev. A* **89**, 022307 | Finite-key 2-decoy. Eq. 3 defines weighted Hoeffding counts used throughout |
+| Lo, Ma & Chen (2005) *PRL* **94**, 230504 | Asymptotic decoy-state theory — justifies μ₁ ≈ 0.5 asymptotically |
+| Tomamichel, Lim, Gisin, Renner (2012) *Nature Comm.* **3**, 634 | Alternative μ phase error correction — equivalent to Rusca γ for our parameters |
+| Fung, Ma & Chau (2010) *Phys. Rev. A* **81**, 012318 | Practical post-processing — phase error estimation |
+| Zhao et al. (2005) *PRL* **96**, 070502 | Experimental decoy-state QKD reference |
+
+---
