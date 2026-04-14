@@ -1,56 +1,116 @@
-# 1-Decoy State QKD — Security Bounds Analysis
+# 1-Decoy State QKD — Finite-Key Security Analysis
 
-Finite-key security analysis of the 1-decoy BB84 protocol following Rusca et al. (2018).  
-Models two hardware systems: AUREA SPD detector and Rusca SNSPD reference.  
-Application context: quantum token transmission over optical fibre.
+Finite-key analysis of the 1-decoy state BB84 QKD protocol, following the framework of Rusca et al. (2018) with parallel Tomamichel single-photon bounds.
 
----
+## Overview
 
-## Usage
+This code simulates the secret key rate (SKR) for a 1-decoy state QKD system under realistic hardware conditions. It implements:
+
+- **Rusca et al. (2018)** — Full decoy-state finite-key analysis (Appendix A, Eq. A25)
+- **Tomamichel et al. (2012)** — Single-photon key length bound (Eq. 2) for comparison
+- **Parameter optimisation** — Joint optimisation of (μ₁, μ₂, p_μ₁, p_Z) to maximise SKR
+- **Symmetric & asymmetric protocols** — Configurable via JSON
+
+## Quick Start
 
 ```bash
-python3 qkd_1decoy_analysis.py params_aurea.json    # AUREA SPD system
-python3 qkd_1decoy_analysis.py params_rusca.json    # Rusca 2018 SNSPD reference
+# Run with AUREA hardware config
+python qkd_1decoy_analysis_v8_0.py params_aurea.json
+
+# Run with Rusca 2018 SNSPD config
+python qkd_1decoy_analysis_v8_0.py params_rusca.json
 ```
 
----
+## Configuration
 
-## Config Files
+All parameters are loaded from a JSON config file — no hardcoded values. Key parameters:
 
-Two config files are included in the repository:
+| Parameter | Description |
+|-----------|-------------|
+| `mu1`, `mu2` | Signal and decoy intensities (initial values, optimised in Fig 2) |
+| `p1` | Signal probability p_μ₁ (initial, optimised in Fig 2) |
+| `pZ` | Z-basis probability (optimised in Fig 2 for asymmetric protocol) |
+| `nZ` | Z-basis block size |
+| `eta_bob` | Detector efficiency |
+| `pdc` | Dark count probability per gate |
+| `alpha` | Fibre attenuation (dB/km) |
+| `edet` | Detector misalignment error rate |
+| `f_rep` | Source repetition rate (Hz) |
+| `dead_us` | Detector dead time (μs) |
+| `odr_losses` | Additional optical losses (dB) |
+| `Protocol_symmetric` | `true` for symmetric (p_Z=0.5), `false` for asymmetric |
+| `K` | Security constant (19 for 1-decoy) |
 
-- **`params_aurea.json`** — AUREA SPD system (our hardware): η_Bob=0.20, p_dc=6×10⁻⁷, f_rep=80 MHz, dead_time=10 μs, odr_losses=11.4 dB, nZ=10⁶
-- **`params_rusca.json`** — Rusca 2018 SNSPD reference: η_Bob=0.50, p_dc=10⁻⁸, f_rep=1 GHz, dead_time=0.1 μs, odr_losses=0 dB, nZ=10⁷
+## Output Figures
 
-All other parameters (μ₁, μ₂, pZ, pX, α, edet, εsec, εcor, fEC, K) are shared and defined in both files.  
-Output figures are automatically named with the config label so files from different configs never overwrite each other.
+### Fig 1 — Security Bounds (6 panels)
+Distance sweep at the config e_det showing all intermediate quantities:
+- Weighted Hoeffding counts, vacuum bounds, s^l_{Z,1}
+- Phase error (Rusca φ vs Tomamichel φ_sp)
+- Secret key length ℓ and SKR (both Rusca and Tomamichel)
 
----
+### Fig 2 — Parameter Optimisation (4 panels)
+Joint optimisation of (μ₁, μ₂, p_μ₁) at each distance to maximise SKR:
+- **(a)** Optimal parameter evolution vs distance (incl. p_Z for asymmetric)
+- **(b)** Optimised SKR vs current config SKR
+- **(c)** Table of optimal parameters at key distances
+- **(d)** Key findings summary
 
-## η_sys Convention
+When `Protocol_symmetric = true`, p_Z has no effect (nX is computed from `compute_nsifted`) so only a 3D scan runs. When `false`, p_Z is included in a 4D scan.
 
-System efficiency follows Anne's explicit convention:
+### Fig 3 — SKR vs e_det (multi-distance)
+Uses the **optimised parameters from Fig 2** at each distance:
+- **(a)** SKR vs e_det: Rusca (solid) vs Tomamichel (dashed) at d = 0, 33, 67, 100 km
+- **(b)** SKR Rusca vs e_obs (observed QBER)
+- **(c)** Numerical table at d = 0 km
 
+### Fig 4 — Hardware Reference
+Practical lookup table for the hardware team:
+- **(a)** SKR at varying e_det using Fig 2 optimised parameters (no re-optimisation)
+- **(b)** SKR vs dead time at the operating point
+
+## Key Equations
+
+### Rusca SKR (Eq. A25)
 ```
-η_sys = η_Bob × 10^(-(att_channel + odr_losses) / 10)
+ℓ = s^l_{Z,0} + s^l_{Z,1}·[1 − h(φ^u_Z)] − f_EC·h(e_obs)·n_Z − 6·log₂(K/ε_sec) − log₂(2/ε_cor)
+SKR = ℓ · f_rep / N_tot
 ```
 
-where `odr_losses = 11.4 dB` for the AUREA system (internal optical losses),  
-and `odr_losses = 0.0 dB` for the Rusca SNSPD reference.
+### Tomamichel Single-Photon SKR (Eq. 2)
+```
+ℓ_sp = s^l_{Z,1}·[1 − h(e_obs_sp + μ)] − f_EC·h(e_obs)·n_Z − log₂(2/(ε²_sec·ε_cor))
+where:
+  e_obs_sp = e_obs × (n_Z / s^l_{Z,1})    — single-photon QBER
+  μ = √[(n+k)/(nk) · (k+1)/k · ln(4/ε_sec)]   — statistical fluctuation (n=n_Z, k=n_X)
+```
 
-At 25 km for AUREA: 5 dB (fibre) + 11.4 dB (odr) = **16.4 dB total** → η_sys ≈ 0.46%
+### Symmetric Protocol
+When `Protocol_symmetric = true`:
+```
+n_S = compute_nsifted(n_Z)    — total sifted events (Alice & Bob same basis)
+n_X = n_S − n_Z
+N_tot = n_S / (cdt · 0.5 · P_dt)
+```
+p_Z has no effect — n_X and N_tot depend only on n_Z.
 
----
+## Dependencies
 
-## Papers
+- Python 3.8+
+- NumPy
+- Matplotlib
+- SciPy (for `uniform_filter1d` smoothing in Fig 2)
 
-| References | |
-|---|---|
-| Rusca et al. (2018) *Appl. Phys. Lett.* **112**, 171104 | Main security proof — Appendix A (bounds) + B (SKR). Eqs. A16–A25, B8 |
-| Lim, Curty, Walenta, Xu, Zbinden (2014) *Phys. Rev. A* **89**, 022307 | Finite-key 2-decoy. Eq. 3 defines weighted Hoeffding counts used throughout |
-| Lo, Ma & Chen (2005) *PRL* **94**, 230504 | Asymptotic decoy-state theory — justifies μ₁ ≈ 0.5 asymptotically |
-| Tomamichel, Lim, Gisin, Renner (2012) *Nature Comm.* **3**, 634 | Alternative μ phase error correction — equivalent to Rusca γ for our parameters |
-| Fung, Ma & Chau (2010) *Phys. Rev. A* **81**, 012318 | Practical post-processing — phase error estimation |
-| Zhao et al. (2005) *PRL* **96**, 070502 | Experimental decoy-state QKD reference |
+## References
 
----
+1. D. Rusca et al., "Finite-key analysis for the 1-decoy state QKD protocol," *Appl. Phys. Lett.* **112**, 171104 (2018)
+2. C. C. W. Lim et al., "Concise security bounds for practical decoy-state quantum key distribution," *Phys. Rev. A* **89**, 022307 (2014)
+3. M. Tomamichel et al., "Tight finite-key analysis for quantum cryptography," *Nature Commun.* **3**, 634 (2012)
+4. X. Ma, B. Qi, Y. Zhao, H.-K. Lo, "Practical decoy state for quantum key distribution," *Phys. Rev. A* **72**, 012326 (2005)
+5. C.-H. F. Fung, X. Ma, H. F. Chau, "Practical issues in quantum-key-distribution postprocessing," *Phys. Rev. A* **81**, 012318 (2010)
+
+## Version History
+
+- **v8.0** — Symmetric/asymmetric protocol support, Tomamichel single-photon SKR (ell_sp, skr_sp), eobs_sp scaling, Fig 4 hardware reference table, dead time sweep
+- **v7.1** — pZ optimisation added to 4D grid, Fig 5 (SKR vs e_det) with Tomamichel comparison
+- **v7.0** — Config-driven (JSON), parameter optimisation, individual slide exports
