@@ -19,6 +19,7 @@ python qkd_1decoy_analysis_v8_0.py params_aurea.json
 
 # Run with AUREA hardware config : Hardware team optimized parameters table
 python hardware_table.py params_aurea.json
+(Results will display on terminal as well saved in hardware_calibration_AUREA_SPD_Our_system.png)
 
 # Run with Rusca 2018 SNSPD config
 python qkd_1decoy_analysis_v8_0.py params_rusca.json
