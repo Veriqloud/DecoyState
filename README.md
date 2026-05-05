@@ -17,6 +17,7 @@ This code simulates the secret key rate (SKR) for a 1-decoy state QKD system und
 ```bash
 # Research analysis with full figures
 python qkd_1decoy_analysis_v13_compact.py params_aurea.json
+(Sweep parameters can be udated "mu1_scan","mu2_frac"..lines 350-362) 
 
 # Hardware calibration table (standalone tool for hardware team)
 python hardware_table.py params_aurea.json
