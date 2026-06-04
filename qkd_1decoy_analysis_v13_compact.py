@@ -77,6 +77,7 @@ else:
     A=[0,0,0]
     tau=[1,1,1]
     R=1  
+disable_pap = cfg['disable_pap']
 
 
 eta_bob    = cfg['eta_bob']
@@ -93,6 +94,7 @@ safe_label = label.replace(' ', '_').replace('—', '').replace('/', '').replace
 NAVY  = "#1F3864"; BLUE  = "#2E75B6"; LBLUE = "#D6E4F7"
 AMBER = "#D4A017"; GREEN = "#70AD47"; RED   = "#C00000"
 TEAL  = "#008080"; GREY  = "#888888"; PURPLE= "#7B2D8B"
+
 
 
 # ============================================================
@@ -302,7 +304,7 @@ GRIDS_FIG2 = GRIDS_CACHE
 #     dead_us_scan = np.array([4,6,10,15,20,40,70,100])
 # )
 
-def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
+def optimize_params(d_km, e_det, grids, dead_us_in=None):
     """Find (mu1*, mu2*, p_mu1*, p_Z*, dead_time*) maximising SKR at (d, e_det).
     
     Now includes dead_time optimization in the outer loop.
@@ -324,13 +326,14 @@ def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
     best = dict(mu1=np.nan, mu2=np.nan, pm1=np.nan, pZ=np.nan, 
                 dead_us=np.nan, skr=0.0, skr_sp=0.0)
 
-    if p_ap_model:
-        dead_us_scann = dead_us_scan
+    if disable_pap:
+        dead_us_scann = [dead_us]
+    elif dead_us_in:
+        dead_us_scann = [dead_us_in]
     else:
-        if dead_us_in:
-            dead_us_scann = [dead_us_in]
-        else:
-            dead_us_scann = [dead_us]        
+        dead_us_scann = dead_us_scan
+    
+                    
 
     # Inner loops: protocol parameters
     for mu1_v in mu1_scan:
@@ -338,13 +341,13 @@ def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
             mu2_v = frac * mu1_v
             if mu1_v <= mu2_v:  continue
             for dead_val in dead_us_scann:
-                if p_ap_model:
+                if disable_pap:
+                    p_ap1_val = 0.0
+                    p_ap2_val = 0.0
+                else:
                     eta = 10**(-(alpha*d_km+odr_losses)/10) * eta_bob
                     p_ap1_val = compute_pap(A, tau, R, dead_val, mu1_v, eta, pdc, coeff)
                     p_ap2_val = compute_pap(A, tau, R, dead_val, mu2_v, eta, pdc, coeff)
-                else:
-                    p_ap1_val = 0.0
-                    p_ap2_val = 0.0
                 for pm1_v in pm1_scan:
                     for pZ_v in pZ_scan:
                         r = compute_all(d_km, e_det=e_det, p1=pm1_v,
@@ -354,7 +357,7 @@ def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
                             best_s = r['skr']
                             best = dict(mu1=mu1_v, mu2=mu2_v, pm1=pm1_v,
                                         pZ=pZ_v, dead_us=dead_val,
-                                        skr=r['skr'], skr_sp=r['skr_sp'])
+                                        skr=r['skr'], skr_sp=r['skr_sp'], eobs=r['eobs'])
 
     return best if best_s >= 1.0 else None
 
@@ -364,7 +367,7 @@ def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
 # ============================================================
 
 def build_optim_cache(distances, edets, grids=GRIDS_CACHE,
-                      force_recompute=False, p_ap_model=None):
+                      force_recompute=False):
     """Return dict keyed by (d, edet) -> optimize_params result.
 
     Now optimizes dead_time if p_ap_model is provided.
@@ -395,21 +398,22 @@ def build_optim_cache(distances, edets, grids=GRIDS_CACHE,
         except Exception as ex:
             print(f"[cache error] {ex} — recomputing")
 
-    if p_ap_model:
+    if disable_pap:
+        print(f"[cache miss] computing {len(distances)}x{len(edets)} = "
+              f"{len(distances)*len(edets)} optimisations (no afterpulse)...")
+    else:
         print(f"[cache miss] computing {len(distances)}x{len(edets)} = "
               f"{len(distances)*len(edets)} optimisations WITH dead_time optimization...")
         #print(f"  Afterpulse: A={p_ap_model['A']:.4f}, tau={p_ap_model['tau']:.2f} μs")
-    else:
-        print(f"[cache miss] computing {len(distances)}x{len(edets)} = "
-              f"{len(distances)*len(edets)} optimisations (no afterpulse)...")
 
     cache = {}
     total = len(distances) * len(edets)
     i = 0
     for d in distances:
         for e in edets:
+            print(f"e= {e}")
             i += 1
-            r = optimize_params(d, e, grids, p_ap_model=p_ap_model)
+            r = optimize_params(d, e, grids)
             cache[(float(d), float(e))] = r
             if r is not None:
                 pZ_str = f", pZ={r['pZ']:.2f}" if not Protocol_symmetric else ""
@@ -418,7 +422,7 @@ def build_optim_cache(distances, edets, grids=GRIDS_CACHE,
                       f"edet={e*100:4.1f}%:  "
                       f"mu1={r['mu1']:.2f}, mu2={r['mu2']:.3f}, "
                       f"pm1={r['pm1']:.2f}{pZ_str}{dead_str}, "
-                      f"SKR={r['skr']:.0f}, SKR_sp={r['skr_sp']:.0f}")
+                      f"SKR={r['skr']:.0f}, SKR_sp={r['skr_sp']:.0f} eobs={r['eobs']:.4f}")
             else:
                 print(f"  [{i:>2d}/{total}] d={d:5.1f} km, "
                       f"edet={e*100:4.1f}%:  no valid optimum")
@@ -517,14 +521,22 @@ def build_fig1(d_sweep):
             'ell_sp','skr_sp','eobs','phi_sp']
     res = {k: np.full(len(d_sweep), np.nan) for k in keys}
     for i, d in enumerate(d_sweep):
-        r = compute_all(d)
+        if disable_pap:
+            p_ap10 = 0.0
+            p_ap20 = 0.0
+        else:
+            eta = 10**(-(alpha*d+odr_losses)/10) * eta_bob
+            p_ap10 = compute_pap(A, tau, R, dead_us, mu1, eta, pdc, coeff)
+            p_ap20 = compute_pap(A, tau, R, dead_us, mu2, eta, pdc, coeff)
+        r = compute_all(d_km=d, e_det=edet, p1=p1, pZ_in=pZ, mu1_in=mu1, mu2_in=mu2,
+                p_ap1=p_ap10, p_ap2=p_ap20, dead_us_in=dead_us)
         if r:
             for k in keys:
                 if k in r:  res[k][i] = r[k]
         if i == 0:
-            print(f"{r}")
+            print(f"d={d} r={r}")
 
-    fig = plt.figure(figsize=(15, 11))
+    fig = plt.figure(figsize=(12, 9))
     fig.patch.set_facecolor('#FAFAFA')
     fig.text(0.5, 0.975,
         f"1-Decoy State QKD — Security Bounds  —  {label}"
@@ -607,7 +619,7 @@ def build_fig1(d_sweep):
 
 def build_fig2a(cache, distances_2a, edets_2a):
     """Four-panel: one panel of params vs edet per distance + SKR panel."""
-    fig = plt.figure(figsize=(16, 12))
+    fig = plt.figure(figsize=(12, 9))
     fig.patch.set_facecolor('#FAFAFA')
 
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.25,
@@ -647,7 +659,7 @@ def build_fig2b(d_sweep, res_fig1, d_op):
     mu2_frac = grids['mu2_frac']
     pm1_scan = grids['pm1_scan']
     pZ_scan  = np.array([pZ]) if Protocol_symmetric else grids['pZ_scan']
-    d_opt    = np.linspace(0, cfg['d_max'], 5)
+    d_opt    = np.linspace(0, cfg['d_max'], 20)
 
     n_combos = len(mu1_scan)*len(mu2_frac)*len(pm1_scan)*len(pZ_scan)
     print(f"\nFig 2: per-distance optimisation at edet={edet*100:.0f}%  —  "
@@ -660,22 +672,21 @@ def build_fig2b(d_sweep, res_fig1, d_op):
     opt_skr = np.full(len(d_opt), np.nan)
 
     for di, d in enumerate(d_opt):
-        r = optimize_params(d, edet, grids, p_ap_model=True)
+        r = optimize_params(d, edet, grids)
         if r is not None:
             opt_mu1[di] = r['mu1']; opt_mu2[di] = r['mu2']
             opt_pm1[di] = r['pm1']; opt_pZ[di]  = r['pZ']
             opt_skr[di] = r['skr']
-        if di % 10 == 0 and r is not None:
+        #if di % 10 == 0 and r is not None:
             pZ_str = f", pZ={r['pZ']:.2f}" if not Protocol_symmetric else ""
             print(f"  d={d:5.0f} km: mu1={r['mu1']:.3f}, mu2={r['mu2']:.3f}, "
-                  f"p_mu1={r['pm1']:.2f}{pZ_str}, dead_us={r['dead_us']:.0f}, SKR={r['skr']:.0f}")
-    print("Done.\n")
+                  f"p_mu1={r['pm1']:.2f}{pZ_str}, dead_us={r['dead_us']:.0f}, SKR={r['skr']:.0f}, eobs={r['eobs']:.4f}")
 
     valid7 = ~np.isnan(opt_skr)
     smooth   = lambda x: uniform_filter1d(x[valid7], size=5)
     smooth_p = lambda x: uniform_filter1d(x[valid7], size=9)
 
-    fig = plt.figure(figsize=(18, 12))
+    fig = plt.figure(figsize=(12, 9))
     fig.patch.set_facecolor('#FAFAFA')
     gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.40, wspace=0.30,
                            left=0.06, right=0.97, top=0.93, bottom=0.06)
@@ -821,11 +832,11 @@ def build_fig2b(d_sweep, res_fig1, d_op):
 
 # Tunable — change these to alter grid / family
 FIG3_EDET_FAMILY = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09]
-FIG3_N_DIST      = 50    # points in distance sweep (0..d_max)
+FIG3_N_DIST      = 10    # points in distance sweep (0..d_max)
 
 
 def _build_fig3_cache(edet_family, d_arr, grids=GRIDS_CACHE,
-                      force_recompute=False, p_ap_model=None):
+                      force_recompute=False):
     """Per-(edet, distance) optimisation for Fig 3.
     
     Now optimizes dead_time if p_ap_model is provided.
@@ -871,13 +882,16 @@ def _build_fig3_cache(edet_family, d_arr, grids=GRIDS_CACHE,
     for e in edet_family:
         for d in d_arr:
             i += 1
-            r = optimize_params(d, e, grids, p_ap_model=p_ap_model)
+            r = optimize_params(d, e, grids)
             cache[(float(e), float(d))] = r
-            if i % 25 == 0 or i == total:
-                s = r['skr'] if r is not None else 0.0
+            #if i % 25 == 0 or i == total:
+            if r is not None:
+                s = r['skr'] 
                 dead_str = f", dead={r['dead_us']:.0f}μs" if r and 'dead_us' in r else ""
                 print(f"  [{i:>3d}/{total}] edet={e*100:.0f}%, "
-                      f"d={d:5.1f} km: SKR={s:.0f}{dead_str}")
+                    f"d={d:5.1f} km: SKR={s:.0f}{dead_str} eobs={r['eobs']:.4f}")
+            else:
+                s = 0.0
 
     with open(cache_file, 'wb') as f:
         pickle.dump(cache, f)
@@ -885,10 +899,10 @@ def _build_fig3_cache(edet_family, d_arr, grids=GRIDS_CACHE,
     return cache
 
 
-def build_fig3(d_op, p_ap_model=None):
+def build_fig3(d_op):
     """Single-panel: SKR (Rusca) vs distance, one curve per e_det."""
     d_arr = np.linspace(0.0, cfg['d_max'], FIG3_N_DIST)
-    fig3_cache = _build_fig3_cache(FIG3_EDET_FAMILY, d_arr, p_ap_model=p_ap_model)
+    fig3_cache = _build_fig3_cache(FIG3_EDET_FAMILY, d_arr)
 
     fig = plt.figure(figsize=(12, 8))
     fig.patch.set_facecolor('#FAFAFA')
@@ -930,12 +944,11 @@ def build_fig3(d_op, p_ap_model=None):
     ax.legend(fontsize=9, loc='upper right', ncol=2)
     ax.set_xlim(d_arr[0], d_arr[-1])
     
-    if p_ap_model:
-        title_str = ('Best-achievable SKR (Rusca) vs distance  —  '
+    
+    title_str = ('Best-achievable SKR (Rusca) vs distance  —  '
                     'per-point optimised $(\mu_1, \mu_2, p_{\mu_1}, p_Z, t_d)$')
-    else:
-        title_str = ('Best-achievable SKR (Rusca) vs distance  —  '
-                    'per-point re-optimised decoy parameters')
+    
+    #title_str = ('Best-achievable SKR (Rusca) vs distance  —  per-point re-optimised decoy parameters')
     
     style_axis(ax,
         title=title_str,
@@ -1011,8 +1024,7 @@ def _build_fig4_cache(d_km, dead_sweep_us, edet_family,
             i += 1
             # For Fig 5(b), we FORCE dead_time to this specific value
             # Pass the p_ap_model dict so p_ap is computed correctly
-            r = optimize_params(d_km, e, grids, p_ap_model=False,
-                                dead_us_in=dt_us)  # Force this dead_time
+            r = optimize_params(d_km, e, grids, dead_us_in=dt_us)  # Force this dead_time
             cache[(float(e), float(dt_us))] = r
             if r is not None and (i % 10 == 0 or i == total):
                 print(f"  [{i:>3d}/{total}] edet={e*100:.0f}%, "
@@ -1158,8 +1170,7 @@ if __name__ == "__main__":
     edets_cache     = [round(x, 2) for x in np.arange(0.01, 0.091, 0.01)]
     cache = None
     if need_cache:
-        cache = build_optim_cache(distances_cache, edets_cache,
-                                  p_ap_model=True)
+        cache = build_optim_cache(distances_cache, edets_cache)
 
     # ── Fig 1 ──
     res_fig1 = None
@@ -1172,7 +1183,15 @@ if __name__ == "__main__":
         keys = ['skr']
         res_fig1 = {k: np.full(len(d_sweep), np.nan) for k in keys}
         for i, d in enumerate(d_sweep):
-            r = compute_all(d)
+            if disable_pap:
+                p_ap10 = 0.0
+                p_ap20 = 0.0
+            else:
+                eta = 10**(-(alpha*d+odr_losses)/10) * eta_bob
+                p_ap10 = compute_pap(A, tau, R, dead_us, mu1, eta, pdc, coeff)
+                p_ap20 = compute_pap(A, tau, R, dead_us, mu2, eta, pdc, coeff)
+            r = compute_all(d_km=d, e_det=edet, p1=p1, pZ_in=pZ, mu1_in=mu1, mu2_in=mu2,
+                    p_ap1=p_ap10, p_ap2=p_ap20, dead_us_in=dead_us)
             if r:
                 for k in keys:
                     if k in r:  res_fig1[k][i] = r[k]
@@ -1192,7 +1211,7 @@ if __name__ == "__main__":
     # ── Fig 3 (SKR vs distance, e_det family) ──
     if need_fig3:
         print("\n" + "="*70 + "\nFIGURE 3\n" + "="*70)
-        build_fig3(d_op, p_ap_model=True)
+        build_fig3(d_op)
 
     # ── Fig 4 (afterpulse) ──
     if need_fig4:

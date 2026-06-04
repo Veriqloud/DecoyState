@@ -1,7 +1,7 @@
 {
     "label": "AUREA SPD Our system",
     "nZ": 10000000.0,
-    "Protocol_symmetric": false,
+    "Protocol_symmetric": true,
     "plots_to_generate": [1],
     "edet": 0.01,
     "d_max": 90,
@@ -27,5 +27,6 @@
         "A": [0.7259936778355481, 0.0781048182188858, 0.007172874606878981],
         "tau": [0.8069961681604292, 7.707481830119044, 82.35728996293335], 
         "R": 16
-    }
+    },
+    "disable_pap": false
 }
