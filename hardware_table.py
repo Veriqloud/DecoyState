@@ -20,7 +20,6 @@ import sys
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
 
 # ============================================================
 #  Helper functions (from v13)
@@ -46,41 +45,32 @@ def min_non_neg_skr(x):
 #  Afterpulse functions
 # ============================================================
 
-def compute_pap(A, tau_us, dead_time_us, T_max_us):
-    """Afterpulse probability integral."""
-    if tau_us <= 0 or A <= 0:
-        return 0.0
-    return A * tau_us * (np.exp(-dead_time_us/tau_us) - np.exp(-T_max_us/tau_us))
 
-def fit_pap_from_qber(dead_times_us, qbers, T_max_us):
-    """Fit afterpulse (A, tau) from QBER calibration."""
-    dt = np.array(dead_times_us, dtype=float)
-    qb = np.array(qbers, dtype=float) / 100.0
-    order = np.argsort(dt)
-    dt, qb = dt[order], qb[order]
+def compute_pap(A, tau, R, dead_time_us, mu, eta, Pdc, coeff):
+    T=80/R
+    Pc0 = 1-np.exp(-mu*eta) + Pdc
+    Pnc = 1 - coeff*Pc0
+    dt1=T*dead_time_us # Deadtime in R*pulse_distance us
+
+    u1 = 1/ (1/tau[0] - R*np.log(Pnc))
+    u2 = 1/ (1/tau[1] - R*np.log(Pnc))
+    u3 = 1/ (1/tau[2] - R*np.log(Pnc))
+
+    R1=R*(1-dt1)
     
-    e_det_base = qb[-1]
-    delta_q = qb[:-1] - e_det_base
-    dt_fit = dt[:-1]
-    y_target = 2.0 * delta_q
-    
-    def model(dt_vals, A, tau):
-        return A * tau * (np.exp(-dt_vals/tau) - np.exp(-T_max_us/tau))
-    
-    try:
-        p0 = [0.1, 10.0]
-        popt, _ = curve_fit(model, dt_fit, y_target, p0=p0,
-                            bounds=([0.0, 0.1], [10.0, 1000.0]), maxfev=5000)
-        A, tau = popt
-        return float(A), float(tau), float(e_det_base), True
-    except:
-        return 0.0, 10.0, float(e_det_base), False
+    pap1 = Pnc**R1*A[0] * np.exp(-(dt1+1)/u1) / (1 - np.exp(-1/u1)) 
+    pap2 = Pnc**R1*A[1] * np.exp(-(dt1+1)/u2) / (1 - np.exp(-1/u2)) 
+    pap3 = Pnc**R1*A[2] * np.exp(-(dt1+1)/u3) / (1 - np.exp(-1/u3)) 
+
+    return (pap1 + pap2 + pap3)
+
+
 
 # ============================================================
 #  Full Rusca compute_all (from v13)
 # ============================================================
 
-def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, p_ap, cfg):
+def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, cfg):
     """Full Rusca et al. 2018 security bounds calculation."""
     
     # Unpack config
@@ -97,6 +87,15 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, p_ap, cfg):
     fEC = cfg['fEC']
     coeff = cfg.get('coeff', 1.0)
     Protocol_symmetric = cfg.get('Protocol_symmetric', False)
+    afterpulse_cfg = cfg.get('afterpulse', {})
+    if afterpulse_cfg :
+        A = afterpulse_cfg.get('A') 
+        tau = afterpulse_cfg.get('tau')
+        R = afterpulse_cfg.get('R')
+    else: 
+        A=[0,0,0]
+        tau=[1,1,1]
+        R=1  
     
     p2 = 1 - p1
     eps1 = esec / K
@@ -114,8 +113,10 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, p_ap, cfg):
     # Detection probabilities with afterpulse
     D1 = 1 - np.exp(-mu1_val*eta) + pdc
     D2 = 1 - np.exp(-mu2_val*eta) + pdc
-    R1 = D1 * (1 + p_ap)
-    R2 = D2 * (1 + p_ap)
+    p_ap1 = compute_pap(A, tau, R, dead_us, mu1_val, eta, pdc, coeff)
+    p_ap2 = compute_pap(A, tau, R, dead_us, mu2_val, eta, pdc, coeff)
+    R1 = D1 * (1 + p_ap1)
+    R2 = D2 * (1 + p_ap2)
     Pdt = p1*R1 + p2*R2
     if Pdt <= 0:  return None
     
@@ -139,8 +140,10 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, p_ap, cfg):
     if dnZ >= nZ1 or dnZ >= nZ2:  return None
     
     # QBER with afterpulse
-    E1 = ((1-np.exp(-mu1_val*eta))*e_det + pdc/2 + p_ap*D1/2) / R1
-    E2 = ((1-np.exp(-mu2_val*eta))*e_det + pdc/2 + p_ap*D2/2) / R2
+    Pdt1 = coeff*(1 - np.exp(-mu1_val*eta) + pdc) * (1+coeff*p_ap1)
+    E1 = (coeff*(1-np.exp(-mu1_val*eta))*(e_det +coeff*p_ap1/2) + coeff*pdc*(1+coeff*p_ap1)/2) / Pdt1
+    Pdt2 = coeff*(1 - np.exp(-mu2_val*eta) + pdc) * (1+coeff*p_ap2)
+    E2 = (coeff*(1-np.exp(-mu2_val*eta))*(e_det +coeff*p_ap2/2) + coeff*pdc*(1+coeff*p_ap2)/2) / Pdt2
     mZ1 = nZ1*E1; mZ2 = nZ2*E2; mZ = mZ1+mZ2; eobs = mZ/nZ
     mX1 = nX1*E1; mX2 = nX2*E2; mX = mX1+mX2
     
@@ -192,7 +195,7 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, p_ap, cfg):
     if np.isnan(ell) or np.isinf(ell) or ell < 0:  ell = 0.0
     if np.isnan(skr) or np.isinf(skr) or skr < 0:  skr = 0.0
     
-    return {'skr': skr, 'eobs': eobs, 'phi': phi}
+    return {'skr': skr, 'eobs': eobs, 'phi': phi, 'count_rate': cdt*Pdt*f_rep}
 
 # ============================================================
 #  Optimization
@@ -202,49 +205,38 @@ def optimize_params(d_km, edet, cfg):
     """Find optimal (μ₁, μ₂, p_μ₁, p_Z, dead_time) using full Rusca bounds."""
     
     # Grid from v13
-    mu1_scan = np.linspace(0.12, 1.0, 8)
-    mu2_frac = np.linspace(0.15, 0.85, 6)
-    pm1_scan = np.linspace(0.02, 0.90, 12)
-    pZ_scan = np.arange(0.70, 0.96, 0.035)
-    
+    mu1_scan = np.linspace(0.06, 0.6, 10)
+    mu2_frac = np.linspace(0.1, 0.45, 6)
+    pm1_scan = np.linspace(0.17, 0.81, 12)
+    #pZ_scan = np.arange(0.70, 0.96, 0.035)
+    pZ_scan = np.linspace(0.35, 0.95, 10)
+
     # Dead time sweep (from Fig 5b)
-    dead_scan = [6, 10, 15, 20, 30, 40]  # μs
+    dead_scan = [4, 6, 10, 20, 40, 60, 80, 100]  # μs
+
     
-    # Get afterpulse parameters
-    afterpulse_cfg = cfg.get('afterpulse', {})
-    T_max_us = afterpulse_cfg.get('T_max_us', 100.0)
-    qber_cal = afterpulse_cfg.get('qber_calibration')
-    
-    if qber_cal:
-        A, tau, e_base, ok = fit_pap_from_qber(
-            qber_cal['dead_time_us'], qber_cal['qber_pct'], T_max_us)
-    else:
-        A, tau = 0.0, 0.0
     
     best_skr = 0
     best = None
     
-    # Outer loop: dead time
-    for dead_us in dead_scan:
-        # Compute p_ap for this dead time
-        p_ap = compute_pap(A, tau, dead_us, T_max_us) if A > 0 else 0.0
-        
-        # Make temporary config with this dead time
-        cfg_temp = cfg.copy()
-        cfg_temp['dead_us'] = dead_us
-        
-        # Inner loops: protocol parameters
-        for mu1_v in mu1_scan:
-            for frac in mu2_frac:
-                mu2_v = frac * mu1_v
-                if mu2_v < 0.01:
-                    continue
+         
+    # Inner loops: protocol parameters
+    for mu1_v in mu1_scan:
+        #for mu2_v in mu2_scan:
+        for frac in mu2_frac:
+            mu2_v = frac * mu1_v
+            if mu1_v <= mu2_v:
+                continue
+            # Outer loop: dead time
+            for dead_us in dead_scan:
+                # Make temporary config with this dead time
+                cfg_temp = cfg.copy()
+                cfg_temp['dead_us'] = dead_us
                 
                 for pm1_v in pm1_scan:
                     for pZ_v in pZ_scan:
                         
-                        r = compute_all(d_km, edet, pm1_v, pZ_v, mu1_v, mu2_v, 
-                                       p_ap, cfg_temp)
+                        r = compute_all(d_km, edet, pm1_v, pZ_v, mu1_v, mu2_v, cfg_temp)
                         
                         if r is not None and r['skr'] > best_skr:
                             best_skr = r['skr']
@@ -254,7 +246,9 @@ def optimize_params(d_km, edet, cfg):
                                 'pm1': pm1_v,
                                 'pZ': pZ_v,
                                 'dead_us': dead_us,
-                                'skr': r['skr']
+                                'skr': r['skr'], 
+                                'eobs': r['eobs'],
+                                'count_rate': r['count_rate']
                             }
     
     return best
@@ -278,18 +272,24 @@ def save_table_figure(results_dict, label, cfg):
     # Title at top
     fig.text(0.5, 0.96, f"Hardware Calibration Table — {label}",
              ha='center', va='top', fontsize=14, fontweight='bold', color='#1f4788')
+
+    if cfg['Protocol_symmetric']:
+        Protocol_running = "Protocol Symmetric"
+    else:
+        Protocol_running = "Protocol Asymmetric"
     
     # System info below title
     fig.text(0.5, 0.93, 
-             f"Dead time: {cfg['dead_us']:.1f} μs  |  "
+             #f"Dead time: {cfg['dead_us']:.1f} μs  |  "
              f"n_Z={cfg['nZ']:.0e}  |  "
              f"ε_sec={cfg['esec']:.0e}  |  "
-             f"f_EC={cfg['fEC']:.2f}",
+             f"f_EC={cfg['fEC']:.2f}  |  "
+             f"using {Protocol_running}",
              ha='center', va='top', fontsize=10, color='#555')
     
     # Column headers
     col_labels = ['e_det\n(%)', 'Distance\n(km)', 'SKR\n(bits/s)', 
-                  'μ₁', 'μ₂', 'μ₂/μ₁', 'p_μ₁', 'p_Z', 'Dead\n(μs)']
+                  'μ₁', 'μ₂', 'p_μ₁', 'p_Z', 'Dead\n(μs)', 'μ₂/μ₁', 'eobs', 'count_rate']
     
     # Build table data
     table_data = []
@@ -298,13 +298,13 @@ def save_table_figure(results_dict, label, cfg):
     for i, (edet, rows) in enumerate(results_dict.items()):
         for j, row_data in enumerate(rows):
             if j == 0:
-                table_data.append([f"{edet*100:.0f}", row_data[0], row_data[1],
-                                  row_data[2], row_data[3], row_data[4],
-                                  row_data[5], row_data[6], row_data[7]])
+                table_data.append([f"{edet*100:.2f}", row_data[0], row_data[1],
+                                  row_data[2], row_data[3],
+                                  row_data[4], row_data[5], row_data[6], row_data[7], row_data[8], row_data[9]])
             else:
                 table_data.append(['', row_data[0], row_data[1], row_data[2],
-                                  row_data[3], row_data[4], row_data[5],
-                                  row_data[6], row_data[7]])
+                                  row_data[3], row_data[4],
+                                  row_data[5], row_data[6], row_data[7], row_data[8], row_data[9]])
             
             row_colors.append('#E6EEF7' if i % 2 == 0 else 'white')
     
@@ -370,21 +370,13 @@ def generate_table(config_file):
     label = cfg['label']
     dead_us_config = cfg['dead_us']
     
-    # Compute afterpulse for display
-    afterpulse_cfg = cfg.get('afterpulse', {})
-    T_max_us = afterpulse_cfg.get('T_max_us', 100.0)
-    qber_cal = afterpulse_cfg.get('qber_calibration')
-    
-    if qber_cal:
-        A, tau, e_base, ok = fit_pap_from_qber(
-            qber_cal['dead_time_us'], qber_cal['qber_pct'], T_max_us)
-        p_ap_display = compute_pap(A, tau, dead_us_config, T_max_us)
-    else:
-        A, tau, p_ap_display = 0.0, 0.0, 0.0
-    
     # Ranges
-    distances = [0, 10, 25, 50, 75, 100]
-    edet_range = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+    #distances = [0, 10, 25, 50, 75, 100]
+    #edet_range = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07]
+    #distances = [0,18,43]
+    distances = [0,18,43]
+    edet_range = np.arange(1,14)/200 
+    
     
     # Header
     print("=" * 130)
@@ -393,8 +385,13 @@ def generate_table(config_file):
     print(f"Configuration:")
     print(f"  - Fiber loss: {cfg['alpha']:.3f} dB/km")
     print(f"  - Bob efficiency: {cfg['eta_bob']*100:.0f}%")
-    print(f"  - Afterpulse: A={A:.4f}, τ={tau:.2f} μs")
+    print(f"  - Repetition rate: {cfg['f_rep']/1e6:.1f} MHz")
+    #print(f"  - Afterpulse: A={A:.4f}, τ={tau:.2f} μs")
     print(f"  - Security: n_Z={cfg['nZ']:.0e}, ε_sec={cfg['esec']:.0e}, f_EC={cfg['fEC']:.2f}")
+    if cfg['Protocol_symmetric']:
+        print(f"  - Protocol: Symmetric")
+    else:
+        print(f"  - Protocol: Asymmetric")
     print(f"  - Using FULL Rusca et al. 2018 bounds (same as main simulator)")
     print(f"  - Optimizing over (μ₁, μ₂, p_μ₁, p_Z, dead_time)")
     print("=" * 130)
@@ -406,10 +403,10 @@ def generate_table(config_file):
     # Generate tables
     for edet in edet_range:
         print("─" * 130)
-        print(f"  Optical Misalignment: e_det = {edet*100:.0f}%")
-        print("─" * 130)
-        print(f"{'Distance':>10s}  {'SKR (bits/s)':>14s}  {'μ₁':>8s}  {'μ₂':>8s}  "
-              f"{'μ₂/μ₁':>8s}  {'p_μ₁':>8s}  {'p_Z':>8s}  {'Dead (μs)':>11s}")
+        #print(f"  Optical Misalignment: e_det = {edet*100:.2f}%")
+        #print("─" * 130)
+        print(f"{'edet':>5s} {'Distance':>10s}  {'SKR (bits/s)':>14s}  {'μ₁':>8s}  {'μ₂':>8s}  "
+              f"{'p_μ₁':>8s}  {'p_Z':>8s}  {'Dead (μs)':>11s} {'μ₂/μ₁':>8s} {'eobs':>8s} {'count_rate':>14s}")
         print("-" * 130)
         
         results_dict[edet] = []
@@ -420,23 +417,26 @@ def generate_table(config_file):
             if result and result['skr'] >= 0.1:
                 mu2_mu1 = result['mu2'] / result['mu1']
                 dead_opt = result['dead_us']
-                print(f"{d:8.0f} km  {result['skr']:14.1f}  "
-                      f"{result['mu1']:8.3f}  {result['mu2']:8.3f}  "
-                      f"{mu2_mu1:8.2f}  {result['pm1']:8.2f}  "
-                      f"{result['pZ']:8.2f}  {dead_opt:11.1f}")
+                eobs = result['eobs']
+                count_rate = result['count_rate']
+                print(f"{edet*100:5.2f}% {d:6.0f} km  {result['skr']:13.1f}  "
+                      f"{result['mu1']:9.3f}  {result['mu2']:9.3f}  "
+                      f"{result['pm1']:7.2f}  "
+                      f"{result['pZ']:8.2f}  {dead_opt:10.1f} {mu2_mu1:9.2f}"
+                      f"{eobs*100:9.2f} {count_rate:14.1f}")
                 
                 results_dict[edet].append([
                     f"{d:.0f}", f"{result['skr']:.0f}",
                     f"{result['mu1']:.3f}", f"{result['mu2']:.3f}",
-                    f"{mu2_mu1:.2f}", f"{result['pm1']:.2f}",
-                    f"{result['pZ']:.2f}", f"{dead_opt:.1f}"
+                    f"{result['pm1']:.2f}",
+                    f"{result['pZ']:.2f}", f"{dead_opt:.1f}", f"{mu2_mu1:.2f}", f"{eobs*100:.2f}", f"{count_rate:.1f}"
                 ])
             else:
-                print(f"{d:8.0f} km  {'<0.1':>14s}  {'—':>8s}  {'—':>8s}  "
-                      f"{'—':>8s}  {'—':>8s}  {'—':>8s}  {'—':>11s}")
+                print(f"{edet*100:5.2f}% {d:6.0f} km  {'<0.1':>14s}  {'—':>8s}  {'—':>8s}  "
+                      f"{'—':>8s}  {'—':>8s}  {'—':>11s} {'—':>8s} {'—':>8s} {'—':>14s}")
                 
                 results_dict[edet].append([
-                    f"{d:.0f}", '<0.1', '—', '—', '—', '—', '—', '—'
+                    f"{d:.0f}", '<0.1', '—', '—', '—', '—', '—', '—', '—', '—', '—' 
                 ])
         
         print()

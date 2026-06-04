@@ -30,7 +30,7 @@ import math
 import pickle
 import numpy as np
 import matplotlib
-matplotlib.use('macosx')
+#matplotlib.use('macosx')
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.patches import FancyBboxPatch
@@ -39,7 +39,7 @@ import json
 import sys
 import os
 from scipy.ndimage import uniform_filter1d
-from scipy.optimize import curve_fit
+
 warnings.filterwarnings("ignore")
 
 
@@ -68,6 +68,16 @@ fEC      = cfg['fEC']
 K        = cfg['K']
 eps1     = esec / K
 Protocol_symmetric = cfg['Protocol_symmetric']
+afterpulse_cfg = cfg.get('afterpulse', {})
+if afterpulse_cfg :
+    A = afterpulse_cfg.get('A') 
+    tau = afterpulse_cfg.get('tau')
+    R = afterpulse_cfg.get('R')
+else: 
+    A=[0,0,0]
+    tau=[1,1,1]
+    R=1  
+
 
 eta_bob    = cfg['eta_bob']
 pdc        = cfg['pdc']
@@ -111,110 +121,29 @@ def min_non_neg_skr(x):
 #  AFTERPULSE MODEL: P(t) = A * exp(-t/tau)
 # ============================================================
 
-def compute_pap(A, tau_us, dead_time_us, T_max_us):
-    """Integrate A * exp(-t/tau) from dead_time to T_max (all in us).
+def compute_pap(A, tau, R, dead_time_us, mu, eta, Pdc, coeff):
+    T=80/R
+    Pc0 = 1-np.exp(-mu*eta) + Pdc
+    Pnc = 1 - coeff*Pc0
+    dt1=T*dead_time_us # Deadtime in R*pulse_distance us
 
-    Returns dimensionless p_ap = A * tau * [exp(-dt/tau) - exp(-Tmax/tau)].
-    """
-    if tau_us <= 0 or A <= 0:
-        return 0.0
-    return A * tau_us * (np.exp(-dead_time_us/tau_us) -
-                         np.exp(-T_max_us/tau_us))
+    u1 = 1/ (1/tau[0] - R*np.log(Pnc))
+    u2 = 1/ (1/tau[1] - R*np.log(Pnc))
+    u3 = 1/ (1/tau[2] - R*np.log(Pnc))
 
+    R1=R*(1-dt1)
+    
+    pap1 = Pnc**R1*A[0] * np.exp(-(dt1+1)/u1) / (1 - np.exp(-1/u1)) 
+    pap2 = Pnc**R1*A[1] * np.exp(-(dt1+1)/u2) / (1 - np.exp(-1/u2)) 
+    pap3 = Pnc**R1*A[2] * np.exp(-(dt1+1)/u3) / (1 - np.exp(-1/u3)) 
 
-def fit_pap_from_qber(dead_times_us, qbers, T_max_us):
-    """Fit A, tau from (dead_time, QBER) calibration points.
-
-    Uses the longest dead_time as baseline e_det (afterpulse ~ 0 there).
-    Then QBER_i - e_det_base = p_ap(dt_i) / 2, fit single exponential
-    to the remaining points.
-
-    Note: we deliberately do NOT include the 'd' (noise offset) term from
-    Ziarkash et al. 2018 (Sci. Rep. 8, 5076) Eq. 1 in this QBER-based fit.
-    Their 'd' is the Poisson floor of the g(2) cross-correlation histogram
-    (see fit_pap_from_timestamps for that). For the integrated QBER model
-    we only have 4 calibration points (dead_time, QBER); adding d and
-    e_det as free parameters would leave zero degrees of freedom.
-    Per their Section 4.1, multi-exponential tau values depend on the
-    number of exponentials and the hold-off range anyway, so we keep
-    the fit minimal: (A, tau) with e_det_base fixed at longest dead time.
-
-    Returns (A, tau_us, e_det_baseline, fit_ok).
-    """
-    dt  = np.array(dead_times_us, dtype=float)
-    qb  = np.array(qbers, dtype=float) / 100.0    # convert % -> fraction
-    order = np.argsort(dt)
-    dt, qb = dt[order], qb[order]
-
-    e_det_base = qb[-1]                   # QBER at longest dead_time
-    delta_q    = qb[:-1] - e_det_base     # afterpulse QBER contribution
-    dt_fit     = dt[:-1]
-    # p_ap = 2 * delta_q = A*tau*[exp(-dt/tau) - exp(-Tmax/tau)]
-    y_target   = 2.0 * delta_q
-
-    def model(dt_vals, A, tau):
-        return A * tau * (np.exp(-dt_vals/tau) - np.exp(-T_max_us/tau))
-
-    try:
-        p0 = [0.1, 10.0]                  # A ~ 10%, tau ~ 10 us — generic
-        popt, _ = curve_fit(model, dt_fit, y_target, p0=p0,
-                            bounds=([0.0, 0.1], [10.0, 1000.0]),
-                            maxfev=5000)
-        A, tau = popt
-        return float(A), float(tau), float(e_det_base), True
-    except Exception as ex:
-        print(f"[fit_pap_from_qber] fit failed: {ex}")
-        return 0.0, 10.0, float(e_det_base), False
+    return (pap1 + pap2 + pap3)
 
 
-def fit_pap_from_timestamps(path, dead_time_us=6.0, T_max_us=100.0,
-                             clock_hz=80e6, bin_us=1.0):
-    """Fit A * exp(-t/tau) + d to inter-arrival-time histogram from SPD
-    timestamps. Returns dict with keys A, tau, d (Poisson floor),
-    t_bins (us), p_density (1/us), fit_ok — or None if file missing.
-    """
-    if path is None or not os.path.exists(path):
-        return None
-
-    step = 1.0 / clock_hz
-    try:
-        data = np.loadtxt(path)
-        data = data[data != 0]
-        dt_s = np.diff(data) * step       # inter-arrival times in seconds
-        dt_us_arr = dt_s * 1e6
-
-        # Histogram, normalised to probability density (1/us)
-        edges = np.arange(0, T_max_us + bin_us, bin_us) - 0.5
-        h, b  = np.histogram(dt_us_arr, bins=edges)
-        centers = (b[:-1] + b[1:]) / 2
-        density = h / (h.sum() * bin_us)  # probability per us, integrates to 1
-
-        # Fit region: between dead_time and T_max
-        mask = (centers >= dead_time_us) & (centers <= T_max_us)
-        x = centers[mask]
-        y = density[mask]
-
-        def model(t, A, tau, d):
-            return A * np.exp(-t/tau) + d
-
-        # initial guess: d = tail mean, A = peak - d, tau ~ 10 us
-        d0   = float(y[-10:].mean()) if len(y) >= 10 else float(y[-1])
-        A0   = max(float(y[0]) - d0, 1e-6)
-        p0   = [A0, 10.0, d0]
-        popt, _ = curve_fit(model, x, y, p0=p0,
-                            bounds=([0.0, 0.1, 0.0],
-                                    [10.0, 1000.0, 10.0]),
-                            maxfev=5000)
-        A_fit, tau_fit, d_fit = popt
-        return dict(A=float(A_fit), tau=float(tau_fit), d=float(d_fit),
-                    t_bins=centers, p_density=density, fit_ok=True)
-    except Exception as ex:
-        print(f"[fit_pap_from_timestamps] failed: {ex}")
-        return None
 
 
 def compute_all(d_km, e_det=edet, p1=p1, pZ_in=None, mu1_in=None, mu2_in=None,
-                p_ap=0.0, dead_us_in=None):
+                p_ap1=0.0, p_ap2=0.0, dead_us_in=None):
     p2 = 1-p1
 
     pZ_use  = pZ_in  if pZ_in  is not None else pZ
@@ -234,8 +163,8 @@ def compute_all(d_km, e_det=edet, p1=p1, pZ_in=None, mu1_in=None, mu2_in=None,
     D1 = 1 - np.exp(-mu1_use*eta) + pdc
     D2 = 1 - np.exp(-mu2_use*eta) + pdc
     # R_k = total click rate including afterpulses (Rusca)
-    R1 = D1 * (1 + p_ap)
-    R2 = D2 * (1 + p_ap)
+    R1 = D1 * (1 + p_ap1)
+    R2 = D2 * (1 + p_ap2)
     Pdt = p1*R1 + p2*R2      # use R-weighted total click prob
     if Pdt <= 0:  return None
 
@@ -259,8 +188,11 @@ def compute_all(d_km, e_det=edet, p1=p1, pZ_in=None, mu1_in=None, mu2_in=None,
 
     # QBER: Rusca Eq. with afterpulse term p_ap*D_k/2 in numerator, R_k denom
     # Per-detector pdc convention: keep pdc/2 (see discussion Rusca <-> Lim)
-    E1 = ((1-np.exp(-mu1_use*eta))*e_det + pdc/2 + p_ap*D1/2) / R1
-    E2 = ((1-np.exp(-mu2_use*eta))*e_det + pdc/2 + p_ap*D2/2) / R2
+    Pdt1 = coeff*(1 - np.exp(-mu1_use*eta) + pdc) * (1+coeff*p_ap1)
+    E1 = (coeff*(1-np.exp(-mu1_use*eta))*(e_det +coeff*p_ap1/2) + coeff*pdc*(1+coeff*p_ap1)/2) / Pdt1
+    Pdt2 = coeff*(1 - np.exp(-mu2_use*eta) + pdc) * (1+coeff*p_ap2)
+    E2 = (coeff*(1-np.exp(-mu2_use*eta))*(e_det +coeff*p_ap2/2) + coeff*pdc*(1+coeff*p_ap2)/2) / Pdt2
+
     mZ1 = nZ1*E1; mZ2 = nZ2*E2; mZ = mZ1+mZ2; eobs = mZ/nZ
     mX1 = nX1*E1; mX2 = nX2*E2; mX = mX1+mX2
 
@@ -305,14 +237,14 @@ def compute_all(d_km, e_det=edet, p1=p1, pZ_in=None, mu1_in=None, mu2_in=None,
         mu_tom = np.sqrt((nX + nZ)/(nX * nZ) * (nZ + 1)/nZ * np.log(4/esec))
     else:
         mu_tom = 0.5
-    phi_tom = min(phi_raw + mu_tom, 0.5)
-    eobs_sp = eobs * (nZ / sz1l) if sz1l > 0 else 0.5
+    #phi_tom = min(phi_raw + mu_tom, 0.5)
+    #eobs_v2 = eobs * (nZ / sz1l) if sz1l > 0 else 0.5
     phi_sp  = min(mX/nX + mu_tom, 0.5) if nX > 0 else 0.5
 
     overhead = 6*np.log2(K/esec) + np.log2(2/ecor)
     lEC      = fEC * hbin(eobs) * nZ
     ell      = max(sz0l + sz1l*(1-hbin(phi))     - lEC - overhead, 0.0)
-    ell_tom  = max(sz0l + sz1l*(1-hbin(phi_tom)) - lEC - overhead, 0.0)
+    #ell_tom  = max(sz0l + sz1l*(1-hbin(phi_tom)) - lEC - overhead, 0.0)
     ell_sp   = max(nZ*(1-hbin(phi_sp)) - lEC - np.log2(2/(esec**2*ecor)), 0.0)
 
     penalty_decoy  = pref * term_d
@@ -320,7 +252,7 @@ def compute_all(d_km, e_det=edet, p1=p1, pZ_in=None, mu1_in=None, mu2_in=None,
     penalty_vacuum = pref * term_v
 
     skr     = min_non_neg_skr(ell     * f_rep / Ntot) if Ntot > 0 else 0.0
-    skr_tom = min_non_neg_skr(ell_tom * f_rep / Ntot) if Ntot > 0 else 0.0
+    #skr_tom = min_non_neg_skr(ell_tom * f_rep / Ntot) if Ntot > 0 else 0.0
     skr_sp  = min_non_neg_skr(ell_sp  * f_rep / Ntot) if Ntot > 0 else 0.0
 
     if np.isnan(ell) or np.isinf(ell) or ell < 0:  ell = 0.0
@@ -330,15 +262,15 @@ def compute_all(d_km, e_det=edet, p1=p1, pZ_in=None, mu1_in=None, mu2_in=None,
         nZ1pw=nZ1pw, nZ2mw=nZ2mw,
         sz0u=sz0u, sz0l=sz0l, sz0l_raw=sz0l_raw, sz1l=sz1l,
         time=nZ/(Pdt*f_rep),
-        phi_raw=phi_raw, eobs=eobs, eobs_sp=eobs_sp,
-        phi=phi, phi_sp=phi_sp, phi_tom=phi_tom, mu_tom=mu_tom,
-        ell=ell, ell_sp=ell_sp, ell_tom=ell_tom,
-        skr=skr, skr_sp=skr_sp, skr_tom=skr_tom,
+        phi_raw=phi_raw, eobs=eobs,
+        phi=phi, phi_sp=phi_sp, mu_tom=mu_tom,
+        ell=ell, ell_sp=ell_sp, 
+        skr=skr, skr_sp=skr_sp, 
         penalty_decoy=penalty_decoy, penalty_signal=penalty_signal,
         penalty_vacuum=penalty_vacuum,
         vx1u=vx1u, sx1l=sx1l,
         mX1pw=mX1pw, mX2mw=mX2mw,
-        Pdt=Pdt, Ntot=Ntot,
+        Pdt=Pdt, Ntot=Ntot,count_rate=cdt*Pdt*f_rep
     )
 
 
@@ -352,22 +284,23 @@ GRIDS_CACHE = dict(
     #mu2_frac = np.linspace(0.15, 0.85, 6),
     #pm1_scan = np.linspace(0.02, 0.90, 12),
     #pZ_scan  = np.arange(0.70, 0.96, 0.035),
-    mu1_scan = np.linspace(0.12, 0.90, 8),
-    mu2_frac = np.linspace(0.15, 0.85, 6),
-    pm1_scan = np.linspace(0.02, 0.90, 12),
-    pZ_scan  = np.arange(0.50, 0.96, 0.035),
+    mu1_scan = np.linspace(0.06, 0.6, 10),
+    mu2_frac = np.linspace(0.1, 0.45, 6),
+    pm1_scan = np.linspace(0.17, 0.81, 12),
+    pZ_scan  = np.linspace(0.35, 0.95, 10),
+    dead_us_scan = np.array([4,6,10,20,40,70,100])
 )
-)
+GRIDS_FIG2 = GRIDS_CACHE
 
-# Finer grids for legacy Fig 2 (per-distance optimisation at config edet)
-GRIDS_FIG2 = dict(
-    mu1_scan = np.linspace(0.12, 0.90, 10),
-    mu2_frac = np.linspace(0.15, 0.85, 8),
-    pm1_scan = np.linspace(0.02, 0.90, 20),
-    #pZ_scan  = np.arange(0.70, 0.96, 0.02),
-    pZ_scan  = np.arange(0.50, 0.96, 0.02),
-)
-
+# # Finer grids for legacy Fig 2 (per-distance optimisation at config edet)
+# GRIDS_FIG2 = dict(
+#     mu1_scan = np.linspace(0.12, 0.90, 10),
+#     mu2_frac = np.linspace(0.15, 0.85, 8),
+#     pm1_scan = np.linspace(0.02, 0.90, 20),
+#     #pZ_scan  = np.arange(0.70, 0.96, 0.02),
+#     pZ_scan  = np.arange(0.50, 0.96, 0.02),
+#     dead_us_scan = np.array([4,6,10,15,20,40,70,100])
+# )
 
 def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
     """Find (mu1*, mu2*, p_mu1*, p_Z*, dead_time*) maximising SKR at (d, e_det).
@@ -384,50 +317,39 @@ def optimize_params(d_km, e_det, grids, p_ap_model=None, dead_us_in=None):
     mu2_frac = grids['mu2_frac']
     pm1_scan = grids['pm1_scan']
     pZ_scan  = np.array([pZ]) if Protocol_symmetric else grids['pZ_scan']
+    dead_us_scan = grids['dead_us_scan']
     
-    # Dead time sweep (if p_ap_model provided AND dead_us_in not forced)
-    if dead_us_in is not None:
-        # User is forcing a specific dead_time (e.g., for Fig 5b sweep)
-        dead_scan = [dead_us_in]
-        if p_ap_model is not None:
-            A_fit = p_ap_model['A']
-            tau_fit = p_ap_model['tau']
-            T_max_us = p_ap_model['T_max_us']
-        else:
-            A_fit = tau_fit = T_max_us = 0.0
-    elif p_ap_model is not None:
-        # Optimize dead_time by sweeping - use same grid as Fig 5(b) for consistency
-        dead_scan = np.linspace(6, 100, 20)  # μs - 20 points, same as DEAD_SWEEP
-        A_fit = p_ap_model['A']
-        tau_fit = p_ap_model['tau']
-        T_max_us = p_ap_model['T_max_us']
-    else:
-        # No optimization, no model, use config default
-        dead_scan = [dead_us]
-        A_fit = tau_fit = T_max_us = 0.0
 
     best_s = 0.0
     best = dict(mu1=np.nan, mu2=np.nan, pm1=np.nan, pZ=np.nan, 
                 dead_us=np.nan, skr=0.0, skr_sp=0.0)
 
-    # Outer loop: dead time
-    for dead_val in dead_scan:
-        # Compute p_ap for this dead time
-        if p_ap_model is not None:
-            p_ap_val = compute_pap(A_fit, tau_fit, dead_val, T_max_us)
+    if p_ap_model:
+        dead_us_scann = dead_us_scan
+    else:
+        if dead_us_in:
+            dead_us_scann = [dead_us_in]
         else:
-            p_ap_val = 0.0
-        
-        # Inner loops: protocol parameters
-        for mu1_v in mu1_scan:
-            for frac in mu2_frac:
-                mu2_v = frac * mu1_v
-                if mu2_v < 0.01:  continue
+            dead_us_scann = [dead_us]        
+
+    # Inner loops: protocol parameters
+    for mu1_v in mu1_scan:
+        for frac in mu2_frac:
+            mu2_v = frac * mu1_v
+            if mu1_v <= mu2_v:  continue
+            for dead_val in dead_us_scann:
+                if p_ap_model:
+                    eta = 10**(-(alpha*d_km+odr_losses)/10) * eta_bob
+                    p_ap1_val = compute_pap(A, tau, R, dead_val, mu1_v, eta, pdc, coeff)
+                    p_ap2_val = compute_pap(A, tau, R, dead_val, mu2_v, eta, pdc, coeff)
+                else:
+                    p_ap1_val = 0.0
+                    p_ap2_val = 0.0
                 for pm1_v in pm1_scan:
                     for pZ_v in pZ_scan:
                         r = compute_all(d_km, e_det=e_det, p1=pm1_v,
                                         pZ_in=pZ_v, mu1_in=mu1_v, mu2_in=mu2_v,
-                                        p_ap=p_ap_val, dead_us_in=dead_val)
+                                        p_ap1=p_ap1_val, p_ap2=p_ap2_val, dead_us_in=dead_val)
                         if r is not None and r['skr'] > best_s:
                             best_s = r['skr']
                             best = dict(mu1=mu1_v, mu2=mu2_v, pm1=pm1_v,
@@ -448,14 +370,14 @@ def build_optim_cache(distances, edets, grids=GRIDS_CACHE,
     Now optimizes dead_time if p_ap_model is provided.
     Cache filename includes A,tau so different afterpulse configs don't collide.
     """
-    if p_ap_model:
-        A_str = f"A{p_ap_model['A']:.4f}"
-        tau_str = f"tau{p_ap_model['tau']:.2f}"
-        cache_file = os.path.join(
-            save_dir, f'cache_fig2a_{safe_label}_{A_str}_{tau_str}.pkl')
-    else:
-        cache_file = os.path.join(
-            save_dir, f'cache_fig2a_{safe_label}_nopap.pkl')
+    # if p_ap_model:
+    #     A_str = f"A{p_ap_model['A']:.4f}"
+    #     tau_str = f"tau{p_ap_model['tau']:.2f}"
+    #     cache_file = os.path.join(
+    #         save_dir, f'cache_fig2a_{safe_label}_{A_str}_{tau_str}.pkl')
+    # else:
+    cache_file = os.path.join(
+        save_dir, f'cache_fig2a_{safe_label}_nopap.pkl')
 
     if os.path.exists(cache_file) and not force_recompute:
         try:
@@ -476,7 +398,7 @@ def build_optim_cache(distances, edets, grids=GRIDS_CACHE,
     if p_ap_model:
         print(f"[cache miss] computing {len(distances)}x{len(edets)} = "
               f"{len(distances)*len(edets)} optimisations WITH dead_time optimization...")
-        print(f"  Afterpulse: A={p_ap_model['A']:.4f}, tau={p_ap_model['tau']:.2f} μs")
+        #print(f"  Afterpulse: A={p_ap_model['A']:.4f}, tau={p_ap_model['tau']:.2f} μs")
     else:
         print(f"[cache miss] computing {len(distances)}x{len(edets)} = "
               f"{len(distances)*len(edets)} optimisations (no afterpulse)...")
@@ -591,14 +513,16 @@ def plot_skr_vs_edet_panel(ax, edets, cache, distances, colors):
 
 def build_fig1(d_sweep):
     keys = ['nZ1pw','nZ2mw','sz0u','sz0l','sz1l','ell','skr',
-            'phi','phi_tom','mu_tom','ell_tom','skr_tom',
-            'ell_sp','skr_sp','eobs','eobs_sp','phi_sp']
+            'phi','mu_tom',
+            'ell_sp','skr_sp','eobs','phi_sp']
     res = {k: np.full(len(d_sweep), np.nan) for k in keys}
     for i, d in enumerate(d_sweep):
         r = compute_all(d)
         if r:
             for k in keys:
                 if k in r:  res[k][i] = r[k]
+        if i == 0:
+            print(f"{r}")
 
     fig = plt.figure(figsize=(15, 11))
     fig.patch.set_facecolor('#FAFAFA')
@@ -609,7 +533,7 @@ def build_fig1(d_sweep):
     fig.text(0.5, 0.960,
         rf"$\mu_1={mu1}$  $\mu_2={mu2}$  $p_{{\mu_1}}={p1}$  "
         rf"$p_Z={pZ}$  $n_Z=10^{{{int(np.log10(nZ))}}}$  K={K}  "
-        rf"$\eta_{{Bob}}={eta_bob}$  $p_{{dc}}={pdc:.0e}$  "
+        rf"$\eta_{{Bob}}={eta_bob}$  $p_{{dc}}={pdc:.3e}$  "
         rf"$e_{{det}}={edet*100:.0f}\%$",
         ha='center', fontsize=8.5, color='#444444')
 
@@ -645,7 +569,7 @@ def build_fig1(d_sweep):
     ax = fig.add_subplot(gs[1, 1])
     ax.plot(d_sweep, res['phi'],    color=NAVY, lw=2.0, label=r'$\phi^u_Z$ Rusca')
     ax.plot(d_sweep, res['phi_sp'], color=TEAL, lw=1.5, ls='--',
-            label=r'$\phi_{v2}$ Tomamichel')
+            label=r'$\phi_{sp}$ Single Photon')
     ax.axhline(0.11, color=AMBER, lw=0.8, ls=':', alpha=0.7, label='11% threshold')
     ax.set_ylim(0, 0.55)
     ax.legend(fontsize=7.5)
@@ -656,7 +580,7 @@ def build_fig1(d_sweep):
     ax = fig.add_subplot(gs[2, 0])
     ax.semilogy(d_sweep, res['ell'],    color=NAVY, lw=2.0, label=r'$\ell$ Rusca')
     ax.semilogy(d_sweep, res['ell_sp'], color=TEAL, lw=1.5, ls='--',
-                label=r'$\ell_{v2}$ Tomamichel')
+                label=r'$\ell_{sp}$ Single Photon')
     ax.legend(fontsize=7.5)
     style_axis(ax, title=r"5. Secret Key Length $\ell$",
                xlabel="Fibre distance (km)", ylabel="bits")
@@ -665,7 +589,7 @@ def build_fig1(d_sweep):
     ax = fig.add_subplot(gs[2, 1])
     ax.semilogy(d_sweep, res['skr'],    color=BLUE, lw=2.0, label='SKR Rusca')
     ax.semilogy(d_sweep, res['skr_sp'], color=TEAL, lw=1.5, ls='--',
-                label='SKR Tomamichel')
+                label='SKR Single Photon')
     ax.axhline(10000, color=AMBER, lw=0.9, ls=':', alpha=0.8, label='10 kbits/s')
     ax.legend(fontsize=7.5, loc='upper right')
     style_axis(ax, title="6. Secret Key Rate",
@@ -717,13 +641,13 @@ def build_fig2a(cache, distances_2a, edets_2a):
 #  (kept from v10_1; its own optimisation loop, not the cache)
 # ============================================================
 
-def build_fig2(d_sweep, res_fig1, d_op):
+def build_fig2b(d_sweep, res_fig1, d_op):
     grids = GRIDS_FIG2
     mu1_scan = grids['mu1_scan']
     mu2_frac = grids['mu2_frac']
     pm1_scan = grids['pm1_scan']
     pZ_scan  = np.array([pZ]) if Protocol_symmetric else grids['pZ_scan']
-    d_opt    = np.linspace(1, cfg['d_max'], 50)
+    d_opt    = np.linspace(0, cfg['d_max'], 5)
 
     n_combos = len(mu1_scan)*len(mu2_frac)*len(pm1_scan)*len(pZ_scan)
     print(f"\nFig 2: per-distance optimisation at edet={edet*100:.0f}%  —  "
@@ -736,15 +660,15 @@ def build_fig2(d_sweep, res_fig1, d_op):
     opt_skr = np.full(len(d_opt), np.nan)
 
     for di, d in enumerate(d_opt):
-        r = optimize_params(d, edet, grids)
+        r = optimize_params(d, edet, grids, p_ap_model=True)
         if r is not None:
             opt_mu1[di] = r['mu1']; opt_mu2[di] = r['mu2']
             opt_pm1[di] = r['pm1']; opt_pZ[di]  = r['pZ']
             opt_skr[di] = r['skr']
         if di % 10 == 0 and r is not None:
             pZ_str = f", pZ={r['pZ']:.2f}" if not Protocol_symmetric else ""
-            print(f"  d={d:5.0f} km: mu1={r['mu1']:.2f}, mu2={r['mu2']:.3f}, "
-                  f"p_mu1={r['pm1']:.2f}{pZ_str}, SKR={r['skr']:.0f}")
+            print(f"  d={d:5.0f} km: mu1={r['mu1']:.3f}, mu2={r['mu2']:.3f}, "
+                  f"p_mu1={r['pm1']:.2f}{pZ_str}, dead_us={r['dead_us']:.0f}, SKR={r['skr']:.0f}")
     print("Done.\n")
 
     valid7 = ~np.isnan(opt_skr)
@@ -909,38 +833,38 @@ def _build_fig3_cache(edet_family, d_arr, grids=GRIDS_CACHE,
     afterpulse configs do not collide.
     """
     # Build cache filename from afterpulse params
-    if p_ap_model:
-        A_str = f"A{p_ap_model['A']:.4f}"
-        tau_str = f"tau{p_ap_model['tau']:.2f}"
-        cache_file = os.path.join(
-            save_dir, f'cache_fig3_{safe_label}_{A_str}_{tau_str}.pkl')
-    else:
-        cache_file = os.path.join(
-            save_dir, f'cache_fig3_{safe_label}_nopap.pkl')
+    # if p_ap_model:
+    #     A_str = f"A{p_ap_model['A']:.4f}"
+    #     tau_str = f"tau{p_ap_model['tau']:.2f}"
+    #     cache_file = os.path.join(
+    #         save_dir, f'cache_fig3_{safe_label}_{A_str}_{tau_str}.pkl')
+    # else:
+    cache_file = os.path.join(
+    save_dir, f'cache_fig3_{safe_label}_nopap.pkl')
 
-    if os.path.exists(cache_file) and not force_recompute:
-        try:
-            with open(cache_file, 'rb') as f:
-                cache = pickle.load(f)
-            need = set((float(e), float(d)) for e in edet_family for d in d_arr)
-            if need.issubset(set(cache.keys())):
-                print(f"[fig3 cache hit]  {os.path.basename(cache_file)}  "
-                      f"({len(cache)} entries)")
-                return cache
-            else:
-                print(f"[fig3 cache stale] missing "
-                      f"{len(need - set(cache.keys()))} — recomputing")
-        except Exception as ex:
-            print(f"[fig3 cache error] {ex} — recomputing")
+    # if os.path.exists(cache_file) and not force_recompute:
+    try:
+        with open(cache_file, 'rb') as f:
+            cache = pickle.load(f)
+        need = set((float(e), float(d)) for e in edet_family for d in d_arr)
+        if need.issubset(set(cache.keys())):
+            print(f"[fig3 cache hit]  {os.path.basename(cache_file)}  "
+                  f"({len(cache)} entries)")
+            return cache
+        else:
+            print(f"[fig3 cache stale] missing "
+                  f"{len(need - set(cache.keys()))} — recomputing")
+    except Exception as ex:
+        print(f"[fig3 cache error] {ex} — recomputing")
 
     total = len(edet_family) * len(d_arr)
-    if p_ap_model:
-        print(f"[fig3 cache miss] computing {len(edet_family)}x{len(d_arr)} = "
-              f"{total} optimisations WITH dead_time optimization...")
-        print(f"  Afterpulse: A={p_ap_model['A']:.4f}, tau={p_ap_model['tau']:.2f} μs")
-    else:
-        print(f"[fig3 cache miss] computing {len(edet_family)}x{len(d_arr)} = "
-              f"{total} optimisations (no afterpulse)...")
+    # if p_ap_model:
+    #     print(f"[fig3 cache miss] computing {len(edet_family)}x{len(d_arr)} = "
+    #           f"{total} optimisations WITH dead_time optimization...")
+    #     print(f"  Afterpulse: A={p_ap_model['A']:.4f}, tau={p_ap_model['tau']:.2f} μs")
+    # else:
+    print(f"[fig3 cache miss] computing {len(edet_family)}x{len(d_arr)} = "
+          f"{total} optimisations (no afterpulse)...")
 
     cache = {}
     i = 0
@@ -974,17 +898,11 @@ def build_fig3(d_op, p_ap_model=None):
     proto_str = ("1-Decoy BB84 (Rusca et al. 2018) — "
                  + ("Symmetric" if Protocol_symmetric else "Asymmetric")
                  + " protocol")
-    
-    # Build subtitle with afterpulse info
-    if p_ap_model:
-        pap_str = rf", $A={p_ap_model['A']:.3f}$, $\tau={p_ap_model['tau']:.1f}$ μs"
-    else:
-        pap_str = ""
-    
+      
     fig.suptitle(
         rf"Fig 3 — SKR vs distance at optimised $(\mu_1,\mu_2,p_{{\mu_1}},p_Z,t_d)$  —  {label}"
         "\n" + proto_str
-        + rf"  ($n_Z=10^{{{int(np.log10(nZ))}}}$, $K={K}${pap_str})",
+        + rf"  ($n_Z=10^{{{int(np.log10(nZ))}}}$, $K={K}$)",
         fontsize=11, fontweight='bold', color=NAVY, y=0.985)
 
     ax = fig.add_subplot(gs[0])
@@ -1048,31 +966,23 @@ def build_fig3(d_op, p_ap_model=None):
 
 
 # ============================================================
-#  FIGURE 4 — Hardware Reference (table from cache + dead time)
+#  FIGURE 4 — Afterpulse: QBER/p_ap vs dead_time + SKR family
 # ============================================================
 
-
-
-# ============================================================
-#  FIGURE 5 — Afterpulse: QBER/p_ap vs dead_time + SKR family
-# ============================================================
-
-# Tunable knobs for Fig 5 — change these to alter grid resolution / range
+# Tunable knobs for Fig 4 — change these to alter grid resolution / range
 DEAD_SWEEP  = np.linspace(6, 100, 20)            # us — x-axis for panels a,b
-EDET_FAMILY = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09]  # curves on panel b
+EDET_FAMILY = [0.01, 0.02, 0.03, 0.04, 0.05]  # curves on panel b
 
-def _build_fig5_cache(d_km, dead_sweep_us, edet_family, p_ap_model,
+def _build_fig4_cache(d_km, dead_sweep_us, edet_family, 
                       grids=GRIDS_CACHE, force_recompute=False):
     """Per-(edet, dead_time) optimisation for Fig 5 panel (b).
 
     p_ap_model is a callable: dead_time_us -> p_ap (dimensionless).
     Cache key: (edet, dead_time_us). Cache file includes (A, tau).
     """
-    A_tag   = p_ap_model.A   if hasattr(p_ap_model, 'A')   else 0.0
-    tau_tag = p_ap_model.tau if hasattr(p_ap_model, 'tau') else 0.0
     cache_file = os.path.join(
         save_dir,
-        f'cache_fig5_{safe_label}_A{A_tag:.3f}_tau{tau_tag:.1f}_d{d_km:.0f}.pkl')
+        f'cache_fig4_{safe_label}_d{d_km:.0f}.pkl')
 
     if os.path.exists(cache_file) and not force_recompute:
         try:
@@ -1081,17 +991,17 @@ def _build_fig5_cache(d_km, dead_sweep_us, edet_family, p_ap_model,
             need = set((float(e), float(dt)) for e in edet_family
                        for dt in dead_sweep_us)
             if need.issubset(set(cache.keys())):
-                print(f"[fig5 cache hit]  {os.path.basename(cache_file)}  "
+                print(f"[fig4 cache hit]  {os.path.basename(cache_file)}  "
                       f"({len(cache)} entries)")
                 return cache
             else:
-                print(f"[fig5 cache stale] missing {len(need - set(cache.keys()))} — "
+                print(f"[fig4 cache stale] missing {len(need - set(cache.keys()))} — "
                       "recomputing")
         except Exception as ex:
-            print(f"[fig5 cache error] {ex} — recomputing")
+            print(f"[fig4 cache error] {ex} — recomputing")
 
     total = len(edet_family) * len(dead_sweep_us)
-    print(f"[fig5 cache miss] computing {len(edet_family)}x{len(dead_sweep_us)} = "
+    print(f"[fig4 cache miss] computing {len(edet_family)}x{len(dead_sweep_us)} = "
           f"{total} optimisations at d={d_km:.0f} km...")
 
     cache = {}
@@ -1099,83 +1009,47 @@ def _build_fig5_cache(d_km, dead_sweep_us, edet_family, p_ap_model,
     for e in edet_family:
         for dt_us in dead_sweep_us:
             i += 1
-            p_ap_dt = p_ap_model(dt_us)
             # For Fig 5(b), we FORCE dead_time to this specific value
             # Pass the p_ap_model dict so p_ap is computed correctly
-            model_dict = dict(A=p_ap_model.A, tau=p_ap_model.tau, 
-                             T_max_us=p_ap_model.T_max_us)
-            r = optimize_params(d_km, e, grids, p_ap_model=model_dict,
+            r = optimize_params(d_km, e, grids, p_ap_model=False,
                                 dead_us_in=dt_us)  # Force this dead_time
             cache[(float(e), float(dt_us))] = r
             if r is not None and (i % 10 == 0 or i == total):
                 print(f"  [{i:>3d}/{total}] edet={e*100:.0f}%, "
-                      f"dead={dt_us:5.1f}us, p_ap={p_ap_dt:.4f}: "
+                      f"dead={dt_us:5.1f}us,"
                       f"SKR={r['skr']:.0f}")
+                print(f"{r}")
 
     with open(cache_file, 'wb') as f:
         pickle.dump(cache, f)
-    print(f"[fig5 cache saved] {os.path.basename(cache_file)}")
+    print(f"[fig4 cache saved] {os.path.basename(cache_file)}")
     return cache
 
 
-def build_fig5(afterpulse_cfg, p_ap_fitted, ts_fit, d_op):
-    """Three-panel Fig 5: QBER vs dead_time, best SKR vs dead_time,
+def build_fig4(d_op):
+    """Three-panel Fig 4: QBER vs dead_time, best SKR vs dead_time,
     model validation.
 
     p_ap_fitted: dict with keys A, tau, e_det_baseline, T_max_us
     ts_fit: dict from fit_pap_from_timestamps, or None
     """
-    A_fit   = p_ap_fitted['A']
-    tau_fit = p_ap_fitted['tau']
-    e_det_base = p_ap_fitted['e_det_baseline']
-    T_max_us   = p_ap_fitted['T_max_us']
-
-    # Closure: dead_time -> p_ap using the fitted A, tau
-    def p_ap_model(dt_us):
-        return compute_pap(A_fit, tau_fit, dt_us, T_max_us)
-    p_ap_model.A = A_fit
-    p_ap_model.tau = tau_fit
-    p_ap_model.T_max_us = T_max_us
-
+ 
     # Build per-(edet, dead_time) cache at operating distance
-    fig5_cache = _build_fig5_cache(d_op, DEAD_SWEEP, EDET_FAMILY, p_ap_model)
+    fig4_cache = _build_fig4_cache(d_op, DEAD_SWEEP, EDET_FAMILY)
 
-    fig = plt.figure(figsize=(16, 14))
+    fig = plt.figure(figsize=(12, 8))
     fig.patch.set_facecolor('#FAFAFA')
-    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.35, wspace=0.28,
+    gs = gridspec.GridSpec(1, 1, figure=fig, hspace=0.35, wspace=0.28,
                            left=0.07, right=0.97, top=0.93, bottom=0.06)
 
     fig.suptitle(
-        rf"Fig 5 — Afterpulse Analysis  —  {label}  "
-        rf"(d = {d_op:.0f} km, $A$={A_fit:.3f}, $\tau$={tau_fit:.1f} μs, "
-        rf"$T_{{\max}}$={T_max_us:.0f} μs, "
+        rf"Fig 4 — Afterpulse Analysis  —  {label}  "
+        rf"(d = {d_op:.0f} km"
         + ("Symmetric)" if Protocol_symmetric else "Asymmetric)"),
         fontsize=12, fontweight='bold', color=NAVY, y=0.975)
 
-    # ── Panel (a): QBER vs dead_time (measured + fit) ──
-    ax_a = fig.add_subplot(gs[0, 0])
-    dt_meas = np.array(afterpulse_cfg['qber_calibration']['dead_time_us'],
-                       dtype=float)
-    qb_meas = np.array(afterpulse_cfg['qber_calibration']['qber_pct'],
-                       dtype=float) / 100.0
-    dt_fine = np.linspace(DEAD_SWEEP.min(), DEAD_SWEEP.max(), 200)
-    qb_model = e_det_base + 0.5 * np.array(
-        [compute_pap(A_fit, tau_fit, dt, T_max_us) for dt in dt_fine])
-
-    ax_a.plot(dt_fine, qb_model*100, '-', color=BLUE, lw=2.0,
-              label=rf'Model: $e_{{det,0}}={e_det_base*100:.2f}\%$ + $p_{{ap}}/2$')
-    ax_a.plot(dt_meas, qb_meas*100, 'o', color=RED, ms=10,
-              markeredgecolor='white', markeredgewidth=1.5,
-              label='Measured QBER', zorder=5)
-    ax_a.axhline(e_det_base*100, color=GREY, lw=0.8, ls=':',
-                 label=rf'Baseline $e_{{det}} = {e_det_base*100:.2f}\%$')
-    ax_a.legend(fontsize=8.5, loc='upper right')
-    style_axis(ax_a, title=r'(a)  QBER vs Dead Time  —  measurement + model fit',
-               xlabel='Dead time (μs)', ylabel='QBER (%)',
-               fontsize_title=10, fontsize_label=10)
-
     # ── Panel (b): best SKR vs dead_time, e_det family ──
-    ax_b = fig.add_subplot(gs[0, 1])
+    ax_b = fig.add_subplot(gs[0])
     cmap = plt.cm.viridis
     colors_edet = [cmap(i/(len(EDET_FAMILY)-1)) for i in range(len(EDET_FAMILY))]
 
@@ -1184,7 +1058,7 @@ def build_fig5(afterpulse_cfg, p_ap_fitted, ts_fit, d_op):
     for e, col in zip(EDET_FAMILY, colors_edet):
         skr_arr = np.full(len(DEAD_SWEEP), np.nan)
         for i, dt_us in enumerate(DEAD_SWEEP):
-            r = fig5_cache.get((float(e), float(dt_us)))
+            r = fig4_cache.get((float(e), float(dt_us)))
             if r is not None:
                 skr_arr[i] = r['skr']
         ax_b.semilogy(DEAD_SWEEP, skr_arr, 'o-', color=col, lw=1.8, ms=4,
@@ -1206,9 +1080,6 @@ def build_fig5(afterpulse_cfg, p_ap_fitted, ts_fit, d_op):
                                dt_current=dead_us,
                                skr_current=skr_curr if not np.isnan(skr_curr) else 0.0))
 
-    # Mark measured calibration dead times (light grey dotted)
-    for dt_v in dt_meas:
-        ax_b.axvline(dt_v, color=GREY, lw=0.6, ls=':', alpha=0.4)
 
     # Mark current config dead_us (bold red dashed) — "you are here"
     ax_b.axvline(dead_us, color=RED, lw=1.5, ls='--', alpha=0.7, zorder=4,
@@ -1237,40 +1108,9 @@ def build_fig5(afterpulse_cfg, p_ap_fitted, ts_fit, d_op):
               f"{o['skr_current']:10.0f}  {gain_str}")
     print("-" * 70)
 
-    # ── Panel (c): QBER-calibrated model vs measured histogram ──
-    ax_c = fig.add_subplot(gs[1, :])
-    
-    t_fine = np.linspace(0, 300, 500)
-    
-    # Measured histogram dots (if available)
-    if ts_fit is not None:
-        tc = ts_fit['t_bins']
-        pd = ts_fit['p_density']
-        mask = (tc >= 0) & (tc <= 300)
-        # Convert to %/μs, subtract Poisson floor
-        pd_clean = 100 * np.maximum(pd[mask] - ts_fit['d'], 0)
-        ax_c.plot(tc[mask], pd_clean, 'o', color=GREY, ms=3, alpha=0.6,
-                  label='Measured histogram', zorder=2)
-    
-    # QBER-calibrated model (used in security analysis)
-    p_qber = 100 * A_fit * np.exp(-t_fine/tau_fit)
-    ax_c.plot(t_fine, p_qber, '-', color=BLUE, lw=3.0,
-              label=rf'QBER-calibrated model: $A={A_fit:.3f}$, $\tau={tau_fit:.1f}$ μs',
-              zorder=5)
-    
-    ax_c.legend(fontsize=9, loc='upper right', framealpha=0.95)
-    ax_c.set_xlim(0, 300)
-    ax_c.set_ylim(0, max(2.0, 1.1*p_qber[0]))
-    ax_c.grid(True, alpha=0.2, ls=':')
-    style_axis(ax_c,
-        title=r'(c)  QBER-calibrated afterpulse model validation',
-        xlabel='Time after detection (μs)',
-        ylabel=r'Afterpulse probability density (%/μs)',
-        fontsize_title=10, fontsize_label=10)
-    
-    fig.savefig(os.path.join(save_dir, f'fig5_afterpulse_{safe_label}.png'),
+    fig.savefig(os.path.join(save_dir, f'fig4_afterpulse_{safe_label}.png'),
                 dpi=150, bbox_inches='tight', facecolor='#FAFAFA')
-    print(f"Figure 5 saved: fig5_afterpulse_{safe_label}.png")
+    print(f"Figure 4 saved: fig4_afterpulse_{safe_label}.png")
     return fig
 
 
@@ -1295,50 +1135,19 @@ if __name__ == "__main__":
         print(f"  ell    = {r_test['ell']:.6f}")
     print("===================\n")
 
-    # ── Afterpulse: fit (A, tau) from config QBER calibration ──
-    afterpulse_cfg = cfg.get('afterpulse', None)
-    p_ap_fitted = None   # dict with A, tau, e_det_baseline, T_max_us
-    p_ap_scalar = 0.0    # scalar p_ap for Figs 1/2/2a/4 (at config dead_us)
-    ts_fit = None        # timestamp-file fit result, or None
-
-    if afterpulse_cfg is not None:
-        T_max_us = afterpulse_cfg.get('T_max_us', 100.0)
-        qber_cal = afterpulse_cfg.get('qber_calibration')
-        if qber_cal:
-            A_fit, tau_fit, e_base, ok = fit_pap_from_qber(
-                qber_cal['dead_time_us'], qber_cal['qber_pct'], T_max_us)
-            p_ap_fitted = dict(A=A_fit, tau=tau_fit,
-                               e_det_baseline=e_base, T_max_us=T_max_us)
-            p_ap_scalar = compute_pap(A_fit, tau_fit, dead_us, T_max_us)
-            print(f"[afterpulse] QBER fit:  A={A_fit:.4f}, tau={tau_fit:.2f} us, "
-                  f"e_det_base={e_base*100:.2f}%")
-            print(f"[afterpulse] p_ap @ dead_us={dead_us:.1f} us, "
-                  f"T_max={T_max_us:.0f} us:  {p_ap_scalar:.4f}")
-        ts_path = afterpulse_cfg.get('timestamp_file', None)
-        if ts_path:
-            ts_full = os.path.join(save_dir, ts_path) \
-                      if not os.path.isabs(ts_path) else ts_path
-            ts_fit = fit_pap_from_timestamps(
-                ts_full, dead_time_us=DEAD_SWEEP.min(), T_max_us=T_max_us,
-                clock_hz=afterpulse_cfg.get('clock_hz', f_rep))
-            if ts_fit is not None:
-                print(f"[afterpulse] timestamp fit:  A={ts_fit['A']:.4f}, "
-                      f"tau={ts_fit['tau']:.2f} us, d={ts_fit['d']:.4f}")
-            elif ts_path:
-                print(f"[afterpulse] timestamp file not readable at '{ts_full}'")
-    else:
-        print("[afterpulse] no 'afterpulse' config block — p_ap = 0\n")
-
     # ── Which plots? ──
-    plots = cfg.get('plots_to_generate') or ['1', '2', '2a', '3', '4', '5']
-    plots = [str(p) for p in plots]
+    if len(sys.argv) > 2:
+        plots=str(sys.argv[2])
+    else:
+        plots = cfg.get('plots_to_generate') or ['1', '2', '2a', '3', '4']
+        plots = [str(p) for p in plots]
     print(f"\nPlots to generate: {plots}\n")
 
     need_fig1  = '1'  in plots
-    need_fig2  = '2'  in plots
+    need_fig2b = '2b' in plots
     need_fig2a = '2a' in plots
     need_fig3  = '3'  in plots
-    need_fig5  = '5'  in plots
+    need_fig4  = '4'  in plots
     need_cache = need_fig2a
 
     d_sweep = np.linspace(0, cfg['d_max'], 600)
@@ -1350,46 +1159,44 @@ if __name__ == "__main__":
     cache = None
     if need_cache:
         cache = build_optim_cache(distances_cache, edets_cache,
-                                  p_ap_model=p_ap_fitted)
+                                  p_ap_model=True)
 
     # ── Fig 1 ──
     res_fig1 = None
     if need_fig1:
         print("\n" + "="*70 + "\nFIGURE 1\n" + "="*70)
         _, res_fig1 = build_fig1(d_sweep)
-    elif need_fig2:
+    elif need_fig2b:
         # Fig 2 needs res_fig1 for the 'current config' comparison curve
-        print("\n[Fig 2 requested without Fig 1 — computing res_fig1 silently]")
+        print("\n[Fig 2b requested without Fig 1 — computing res_fig1 silently]")
         keys = ['skr']
         res_fig1 = {k: np.full(len(d_sweep), np.nan) for k in keys}
         for i, d in enumerate(d_sweep):
-            r = compute_all(d, p_ap=p_ap_scalar)
+            r = compute_all(d)
             if r:
                 for k in keys:
                     if k in r:  res_fig1[k][i] = r[k]
 
-    # ── Fig 2 (legacy per-distance optim) ──
-    if need_fig2:
-        print("\n" + "="*70 + "\nFIGURE 2\n" + "="*70)
-        build_fig2(d_sweep, res_fig1, d_op)
-
+ 
     # ── Fig 2a (new e_det optim) ──
     if need_fig2a:
         print("\n" + "="*70 + "\nFIGURE 2a\n" + "="*70)
         build_fig2a(cache, distances_cache, edets_cache)
 
+    # ── Fig 2b (legacy per-distance optim) ──
+    if need_fig2b:
+        print("\n" + "="*70 + "\nFIGURE 2b\n" + "="*70)
+        build_fig2b(d_sweep, res_fig1, d_op)
+
+
     # ── Fig 3 (SKR vs distance, e_det family) ──
     if need_fig3:
         print("\n" + "="*70 + "\nFIGURE 3\n" + "="*70)
-        build_fig3(d_op, p_ap_model=p_ap_fitted)
+        build_fig3(d_op, p_ap_model=True)
 
-    # ── Fig 5 (afterpulse) ──
-    if need_fig5:
-        if p_ap_fitted is None:
-            print("\n[Fig 5 skipped — no 'afterpulse' config block with QBER "
-                  "calibration]\n")
-        else:
-            print("\n" + "="*70 + "\nFIGURE 5\n" + "="*70)
-            build_fig5(afterpulse_cfg, p_ap_fitted, ts_fit, d_op)
+    # ── Fig 4 (afterpulse) ──
+    if need_fig4:
+        print("\n" + "="*70 + "\nFIGURE 4\n" + "="*70)
+        build_fig4(d_op)
 
     plt.show()
