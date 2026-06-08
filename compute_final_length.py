@@ -44,48 +44,48 @@ def min_non_neg_skr(x):
 
 ### end for simulation only ###
 
-"""
-nZ : size of the raw key (in bits)
-nZ1 : size of the subset of the raw key from intensity mu1
-nZ2 : size of the subset of the raw key from intensity mu2
-mZ1 : number of errors detected in the subset of the raw key and of intensity mu1 (after error correction)
-mZ2 : number of errors detected in the subset of the raw key and of intensity mu2 (after error correction)
-nX : size of the key used for error estimation
-nX1 : size of the subset of key used for error estimation from intensity mu1
-nX1 : size of the subset of key used for error estimation from intensity mu2
-mX1 : number of errors detected in the subset of the key used for qber estimation and of intensity mu1
-mX1 : number of errors detected in the subset of the key used for qber estimation and of intensity mu2
-mu1 : first intenisty
-mu2 : second intensity, mu2 < mu1
-p1 : probability oif choose the intensity mu1
-lEC : leakage / length of the sydrome sent by Alice to correct the errors
-esec : security parameter (e.g esec = 10^-10)
-ecor : correctness parameter (e.g 10^-10)
-K: security parmater, K = 19 for 1 decoy state protocol
-
-Alice   Bob
-      gc
-    <---- 
-  basis reconciliation  
-    <---->
-nZ1,nZ2 
-nX1,nX2
-     Xkey
-    <----
-mX1
-mX2
-q_measured
-   q_measured, syndrome(Zkey), nZ1,nZ2,mX1,mX2
-    ---->
-            (a) mZ, compute_final_length
-            (b) needs Z1 Z2 to compute mZ1, mZ2, compute_final_length 
-    <----
-
-"""
-
 
 def compute_final_length(nZ, nZ1, nZ2, mZ1, mZ2, nX, nX1, nX2, mX1, mX2, mu1, mu2, p1, lEC, esec, ecor, K):
-    """Full Rusca et al. 2018 security bounds calculation."""
+    """
+    nZ : size of the raw key (in bits)
+    nZ1 : size of the subset of the raw key from intensity mu1
+    nZ2 : size of the subset of the raw key from intensity mu2
+    mZ1 : number of errors detected in the subset of the raw key and of intensity mu1 (after error correction)
+    mZ2 : number of errors detected in the subset of the raw key and of intensity mu2 (after error correction)
+    nX : size of the key used for error estimation
+    nX1 : size of the subset of key used for error estimation from intensity mu1
+    nX1 : size of the subset of key used for error estimation from intensity mu2
+    mX1 : number of errors detected in the subset of the key used for qber estimation and of intensity mu1
+    mX1 : number of errors detected in the subset of the key used for qber estimation and of intensity mu2
+    mu1 : first intenisty
+    mu2 : second intensity, mu2 < mu1
+    p1 : probability oif choose the intensity mu1
+    lEC : leakage / length of the sydrome sent by Alice to correct the errors
+    esec : security parameter (e.g esec = 10^-10)
+    ecor : correctness parameter (e.g 10^-10)
+    K: security parmater, K = 19 for 1 decoy state protocol
+
+    Alice   Bob
+          gc
+        <---- 
+      basis reconciliation  
+        <---->
+    nZ1,nZ2 
+    nX1,nX2
+         Xkey
+        <----
+    mX1
+    mX2
+    q_measured
+       q_measured, syndrome(Zkey), nZ1,nZ2,mX1,mX2
+        ---->
+                (a) mZ, compute_final_length
+                (b) needs Z1 Z2 to compute mZ1, mZ2, compute_final_length 
+        <----
+
+    """
+
+
     
     p2 = 1 - p1
     eps1 = esec / K
