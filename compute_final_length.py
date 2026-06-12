@@ -54,13 +54,13 @@ def compute_final_length(nZ, nZ1, nZ2, mZ1, mZ2, nX, nX1, nX2, mX1, mX2, mu1, mu
     mZ2 : number of errors detected in the subset of the raw key and of intensity mu2 (after error correction)
     nX : size of the key used for error estimation
     nX1 : size of the subset of key used for error estimation from intensity mu1
-    nX1 : size of the subset of key used for error estimation from intensity mu2
+    nX2 : size of the subset of key used for error estimation from intensity mu2
     mX1 : number of errors detected in the subset of the key used for qber estimation and of intensity mu1
-    mX1 : number of errors detected in the subset of the key used for qber estimation and of intensity mu2
+    mX2 : number of errors detected in the subset of the key used for qber estimation and of intensity mu2
     mu1 : first intenisty
     mu2 : second intensity, mu2 < mu1
-    p1 : probability oif choose the intensity mu1
-    lEC : leakage / length of the sydrome sent by Alice to correct the errors
+    p1 : probability of choosing the intensity mu1
+    lEC : leakage / length of the syndrome sent by Alice to correct the errors
     esec : security parameter (e.g esec = 10^-10)
     ecor : correctness parameter (e.g 10^-10)
     K: security parmater, K = 19 for 1 decoy state protocol
@@ -115,9 +115,10 @@ def compute_final_length(nZ, nZ1, nZ2, mZ1, mZ2, nX, nX1, nX2, mX1, mX2, mu1, mu
     # Solution (a)
     sz0u1 = 2*((t0_l*np.exp(mu1)/p1)*(mZ1+dmZ) + dnZ)
     sz0u2 = 2*((t0_l*np.exp(mu2)/p2)*(mZ2+dmZ) + dnZ)
+    print(f"sz0u1 {sz0u1} sz0u2 {sz0u2}")
     sz0u = min(sz0u1, sz0u2)
     # Solution (b) (A.14)
-    #szu0 = 2*(mZ + dnZ)
+    #sz0u = 2*(mZ + dnZ)
 
     sz0l_raw = (t0_l/(mu1-mu2))*(mu1*nZ2mw - mu2*nZ1pw)
     sz0l = max(sz0l_raw, 0.0)
