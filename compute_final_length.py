@@ -165,22 +165,26 @@ if __name__ == "__main__":
         cfg = json.load(f)
 
     print(f"cfg : {json.dumps(cfg, indent=4)}")
-
     label    = cfg['label']
-    coeff    = cfg.get('coeff', 1.0)  # dead-time correction factor (default 1.0)
+
+    # parameters of the protocol
     mu1      = cfg['mu1']
     mu2      = cfg['mu2']
     p1       = cfg['p1']
     pZ       = cfg['pZ']
     nZ       = cfg['nZ']
-    edet       = cfg['edet']
-    dead_us    = cfg['dead_us']
     esec     = cfg['esec']
     ecor     = cfg['ecor']
     fEC      = cfg['fEC']
     K        = cfg['K']
-    d_km = cfg['d_operating_km']
 
+
+    # parameters for running estimation
+
+    d_km = cfg['d_operating_km']
+    coeff    = cfg.get('coeff', 1.0)  # dead-time correction factor (default 1.0)
+    edet       = cfg['edet']
+    dead_us    = cfg['dead_us']
     
     Protocol_symmetric = cfg['Protocol_symmetric']
     afterpulse_cfg = cfg.get('afterpulse', {})
@@ -203,7 +207,7 @@ if __name__ == "__main__":
 
     eta = 10**(-(alpha*d_km+odr_losses)/10) * eta_bob
 
-    
+    # compute simulation
     
     if Protocol_symmetric:
         nS = compute_nsifted(nZ)
