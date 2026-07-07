@@ -110,7 +110,7 @@ for filename in [sys.argv[1]]:
 	elif "dt4_" in filename:
 		DT = 4 # UT
 	elif filename == "wide_gates.txt":
-		DT = 4
+		DT = 4.1875
 		DEADTIME = 335
 		#p0 = [0.9, 1, 0.1, 10]
 	else:

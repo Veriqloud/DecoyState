@@ -44,9 +44,9 @@ def min_non_neg_skr(x):
 # ============================================================
 #  Afterpulse functions
 # ============================================================
+# nd : deadtime in pulse distance ( = 80 * dead_us )
 
-
-def compute_pap(A, tau, R, dead_time_us, mu, eta, Pdc, coeff):
+def compute_papv0(A, tau, R, dead_time_us, mu, eta, Pdc, coeff):
     T=80/R
     Pc0 = 1-np.exp(-mu*eta) + Pdc
     Pnc = 1 - coeff*Pc0
@@ -64,6 +64,23 @@ def compute_pap(A, tau, R, dead_time_us, mu, eta, Pdc, coeff):
 
     return (pap1 + pap2 + pap3)
 
+
+def summ(alpha,n):
+    return np.exp(-alpha*(n+1)) / (1 - np.exp(-alpha))
+
+def compute_pap(A, tau, R, nd, mueta, pdc):
+    #start at nd rather than nd + 1 ?
+    nd = nd//R 
+    pc = 1-np.exp(-mueta) + pdc
+    pnc = 1- pc
+    return pnc**(R * (-nd-1)) * ( A[0] * summ(1/tau[0] - R*np.log(pnc), nd) + A[1] * summ(1/tau[1] - R * np.log(pnc), nd))
+
+
+def compute_qber(nd, mu, eta, R, A, tau, pdc, e0, foF):
+    pap = compute_pap(A, tau, R, nd, mu*eta, pdc)
+    pq = 1 - np.exp(-mu*eta)
+    pap_pulse = pap * (pq + pdc) / (1 - pap)
+    return (foF * pap_pulse * 0.5 + pq * e0 + foF * pdc * 0.5) / (foF*pap_pulse + pq + foF * pdc) 
 
 
 # ============================================================
@@ -86,6 +103,8 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, cfg):
     ecor = cfg.get('ecor', esec)
     fEC = cfg['fEC']
     coeff = cfg.get('coeff', 1.0)
+    f = cfg.get('f', 0.26)
+    foF = f / coeff
     Protocol_symmetric = cfg.get('Protocol_symmetric', False)
     afterpulse_cfg = cfg.get('afterpulse', {})
     if afterpulse_cfg :
@@ -93,8 +112,8 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, cfg):
         tau = afterpulse_cfg.get('tau')
         R = afterpulse_cfg.get('R')
     else: 
-        A=[0,0,0]
-        tau=[1,1,1]
+        A=[0,0]
+        tau=[1,1]
         R=1  
     
     p2 = 1 - p1
@@ -113,8 +132,8 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, cfg):
     # Detection probabilities with afterpulse
     D1 = 1 - np.exp(-mu1_val*eta) + pdc
     D2 = 1 - np.exp(-mu2_val*eta) + pdc
-    p_ap1 = compute_pap(A, tau, R, dead_us, mu1_val, eta, pdc, coeff)
-    p_ap2 = compute_pap(A, tau, R, dead_us, mu2_val, eta, pdc, coeff)
+    p_ap1 = compute_pap(A, tau, R, 80*dead_us, mu1_val*eta, pdc)
+    p_ap2 = compute_pap(A, tau, R, 80*dead_us, mu2_val*eta, pdc)
     R1 = D1 * (1 + p_ap1)
     R2 = D2 * (1 + p_ap2)
     Pdt = p1*R1 + p2*R2
@@ -140,10 +159,8 @@ def compute_all(d_km, e_det, p1, pZ_val, mu1_val, mu2_val, cfg):
     if dnZ >= nZ1 or dnZ >= nZ2:  return None
     
     # QBER with afterpulse
-    Pdt1 = coeff*(1 - np.exp(-mu1_val*eta) + pdc) * (1+coeff*p_ap1)
-    E1 = (coeff*(1-np.exp(-mu1_val*eta))*(e_det +coeff*p_ap1/2) + coeff*pdc*(1+coeff*p_ap1)/2) / Pdt1
-    Pdt2 = coeff*(1 - np.exp(-mu2_val*eta) + pdc) * (1+coeff*p_ap2)
-    E2 = (coeff*(1-np.exp(-mu2_val*eta))*(e_det +coeff*p_ap2/2) + coeff*pdc*(1+coeff*p_ap2)/2) / Pdt2
+    E1 = compute_qber(80*dead_us, mu1_val, eta, R, A, tau, pdc, e_det, foF)
+    E2 = compute_qber(80*dead_us, mu2_val, eta, R, A, tau, pdc, e_det, foF)
     mZ1 = nZ1*E1; mZ2 = nZ2*E2; mZ = mZ1+mZ2; eobs = mZ/nZ
     mX1 = nX1*E1; mX2 = nX2*E2; mX = mX1+mX2
     
@@ -213,8 +230,6 @@ def optimize_params(d_km, edet, cfg):
 
     # Dead time sweep (from Fig 5b)
     dead_scan = [4, 6, 10, 20, 40, 60, 80, 100]  # μs
-
-    
     
     best_skr = 0
     best = None
